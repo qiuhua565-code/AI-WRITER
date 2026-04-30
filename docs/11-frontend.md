@@ -215,77 +215,212 @@ function DashboardPage() {
 
 ### 11.3.4 批量提交 `/dashboard/new`
 
-**V0 已有，改造：**
+**V0 已有，改造**（聚焦情感故事模板，移除通用小说参数）：
 
-1. 标题列表保留，但增加"任务参数"区域：
-   - 题材选择（玄幻/武侠/都市/科幻/其他）
-   - 目标字数滑块（5000 - 30000）
-   - 风格描述（可选 textarea）
-   - 写作模型选择（默认 claude-3.5-sonnet）
-   - 是否需审大纲（switch）
-2. 支持从 .txt / .csv 文件导入标题
-3. 提交前显示"将消耗约 X 万 tokens"估算
+#### 标题输入约定
+
+系统与用户约定以下输入格式，前端需解析并在界面上告知用户：
+
+**手动输入**（文本框）：每行一个标题，空行自动忽略
+
+```
+丈夫失踪三年后，她收到了一封来自地狱的信
+婆婆住院后，我翻出了她的账本
+儿子把我送进养老院的第三天，我看到了那个录像
+她嫁给亿万富翁，却在婚后发现了这个秘密
+```
+
+**文件导入**：
+
+| 格式 | 规则 |
+|---|---|
+| `.txt` | UTF-8，每行一个标题，空行忽略，不需要任何特殊符号 |
+| `.csv` | UTF-8，**第一列**为标题（有无表头均可，系统自动检测），其余列忽略 |
+
+> 前端显示导入提示："支持 .txt 和 .csv 文件，UTF-8 编码，每行/每行第一列一个标题"
+
+#### 表单参数（整批统一，情感故事专用）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 批量创建任务                                                      │
+├──────────────────────────────┬──────────────────────────────────┤
+│ 标题列表                      │ 生成参数                          │
+│                              │                                  │
+│ ┌────────────────────────┐   │ 目标字数                          │
+│ │ 每行一个标题...         │   │ ●————————●  4500字 (4000-5500)  │
+│ │                        │   │                                  │
+│ │                        │   │ 写作模型                          │
+│ │                        │   │ [Claude 3.5 Sonnet ▼]            │
+│ └────────────────────────┘   │                                  │
+│                              │ 是否需审规划                      │
+│ [从文件导入 .txt/.csv]        │ ○ 直接生成（推荐）                │
+│                              │ ● 生成规划后暂停，人工确认后再写   │
+│ 共 X 个标题                   │                                  │
+│                              │ 预估消耗                          │
+│                              │ 约 X 万 tokens（仅供参考）         │
+├──────────────────────────────┴──────────────────────────────────┤
+│             [取消]    [提交 X 个任务 →]                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**参数说明**：
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `target_words` | slider | 4500 | 范围 4000-5500，步进 100 |
+| `writing_model` | select | claude-3-5-sonnet-20241022 | 只列出支持的模型 |
+| `need_plan_review` | switch | false | 开启后每篇在"规划"阶段暂停，人工确认后继续 |
+
+**Token 预估公式**（仅参考，前端展示用）：
+
+```
+单篇消耗 ≈ (target_words × 1.5) + 3000（固定开销：规划+引子+卡点）
+总消耗 ≈ 单篇消耗 × 标题数
+```
+
+#### 代码骨架
 
 ```tsx
+const DEFAULT_CONFIG: EmotionStoryConfig = {
+  template: 'emotion_story',
+  target_words: 4500,
+  writing_model: 'claude-3-5-sonnet-20241022',
+  need_plan_review: false,
+}
+
 function BatchSubmitForm() {
-  const [titles, setTitles] = useState<string[]>([]);
-  const [config, setConfig] = useState<TaskConfig>(DEFAULT_CONFIG);
-  
-  async function handleSubmit() {
-    const result = await api.tasks.createBatch({ titles, config });
-    toast.success(`已提交 ${result.queued_count} 个任务`);
-    router.push('/dashboard');
+  const [titles, setTitles] = useState<string[]>([])
+  const [config, setConfig] = useState<EmotionStoryConfig>(DEFAULT_CONFIG)
+
+  // 解析粘贴/输入的文本
+  function parseTitlesFromText(text: string): string[] {
+    return text.split('\n').map(l => l.trim()).filter(l => l.length > 0)
   }
-  
+
+  // 解析 .txt 文件
+  function parseTxt(content: string): string[] {
+    return parseTitlesFromText(content)
+  }
+
+  // 解析 .csv 文件：取第一列，自动跳过空行，自动检测并跳过表头
+  function parseCsv(content: string): string[] {
+    const lines = content.split('\n').map(l => l.trim()).filter(l => l)
+    const titles = lines.map(l => l.split(',')[0].replace(/^"|"$/g, '').trim())
+    // 如果第一行看起来像表头（"标题"/"title"等）则跳过
+    const headerKeywords = ['标题', 'title', '文章标题', '名称']
+    if (titles.length > 0 && headerKeywords.some(k => titles[0].toLowerCase().includes(k))) {
+      return titles.slice(1).filter(t => t.length > 0)
+    }
+    return titles.filter(t => t.length > 0)
+  }
+
+  async function handleSubmit() {
+    const result = await api.tasks.createBatch({ titles, config })
+    toast.success(`已提交 ${result.queued_count} 个任务，正在排队`)
+    router.push('/dashboard')
+  }
+
+  const estimatedTokens = Math.round(
+    titles.length * (config.target_words * 1.5 + 3000)
+  )
+
   return (
-    <div className="grid grid-cols-2 gap-6">
-      <div>
-        <h2>标题列表</h2>
-        <TextareaWithImport ... />
-        <FileImport accept=".txt,.csv" onParse={setTitles} />
+    <div className="grid grid-cols-2 gap-6 max-w-5xl mx-auto">
+      {/* 左列：标题输入 */}
+      <div className="space-y-4">
+        <TitleTextarea
+          value={titles}
+          onChange={setTitles}
+          onPaste={(text) => setTitles(parseTitlesFromText(text))}
+        />
+        <FileImportButton
+          accept=".txt,.csv"
+          onLoad={(content, type) =>
+            setTitles(type === 'csv' ? parseCsv(content) : parseTxt(content))
+          }
+          hint="支持 .txt 和 .csv 文件，UTF-8 编码，每行一个标题"
+        />
+        <p className="text-sm text-muted-foreground">共 {titles.length} 个标题</p>
       </div>
-      <div>
-        <h2>任务参数</h2>
-        <ConfigForm value={config} onChange={setConfig} />
-        <EstimatedCost titles={titles} config={config} />
+
+      {/* 右列：参数 */}
+      <div className="space-y-6">
+        <TargetWordsSlider
+          value={config.target_words}
+          onChange={(v) => setConfig({ ...config, target_words: v })}
+          min={4000} max={5500} step={100}
+        />
+        <ModelSelect
+          value={config.writing_model}
+          onChange={(v) => setConfig({ ...config, writing_model: v })}
+        />
+        <NeedPlanReviewSwitch
+          value={config.need_plan_review}
+          onChange={(v) => setConfig({ ...config, need_plan_review: v })}
+        />
+        <EstimatedCost tokens={estimatedTokens} count={titles.length} />
       </div>
-      <Button onClick={handleSubmit}>提交 {titles.length} 个任务</Button>
+
+      {/* 提交 */}
+      <div className="col-span-2 flex justify-end gap-3 pt-4 border-t">
+        <Button variant="outline" asChild><Link href="/dashboard">取消</Link></Button>
+        <Button onClick={handleSubmit} disabled={titles.length === 0}>
+          提交 {titles.length} 个任务
+        </Button>
+      </div>
     </div>
-  );
+  )
 }
 ```
 
-### 11.3.5 大纲审核 `/dashboard/article/[id]/outline`
+### 11.3.5 规划审核 `/dashboard/article/[id]/plan`
 
-V0 没有，新增。当任务状态为 `outline_review` 时引导到这里。
+V0 没有，新增。当任务 `need_plan_review = true` 且状态为 `plan_review` 时引导到这里。
+
+> **注意**：原文档写的是"大纲审核"（对应通用小说），情感故事模板改为"规划审核"，页面路由也从 `/outline` 改为 `/plan`。
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ ← 返回    《星际迷途》  [● 待审大纲]      [重新生成大纲]     │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌───────────────────┐  ┌─────────────────────────────────┐ │
-│  │ 大纲结构          │  │ 章节详情                         │ │
-│  │                   │  │                                 │ │
-│  │ ▼ 故事信息        │  │ 第3章 雨夜惊变                  │ │
-│  │   主题: ...       │  │                                 │ │
-│  │   世界观: ...     │  │ 章节标题: [可编辑]              │ │
-│  │   主角: ...       │  │                                 │ │
-│  │                   │  │ 章节梗概:                       │ │
-│  │ ▼ 章节列表 (6)    │  │ ┌─────────────────────────────┐ │ │
-│  │   1. 开篇         │  │ │ [可编辑 textarea]           │ │ │
-│  │   2. 相遇         │  │ │                             │ │ │
-│  │ → 3. 雨夜惊变 ⚙   │  │ └─────────────────────────────┘ │ │
-│  │   4. 决战         │  │                                 │ │
-│  │   5. 转折         │  │ 关键事件:                       │ │
-│  │   6. 结局         │  │   • [可编辑]                    │ │
-│  │                   │  │   • ...                         │ │
-│  │ [+ 添加章节]      │  │                                 │ │
-│  │                   │  │ 目标字数: [____]                │ │
-│  └───────────────────┘  └─────────────────────────────────┘ │
-│                                                             │
-│              [取消]  [保存修改]  [通过大纲，开始生成正文]    │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│ ← 返回    《丈夫失踪三年后…》  [● 待审规划]   [重新生成规划]   │
+├───────────────────────────────────────────────────────────────┤
+│                                                               │
+│  故事类型：婚姻/情感                                           │
+│  核心冲突：[可编辑] 妻子独自抚养孩子三年，收到疑似亡夫来信     │
+│                                                               │
+│  主要人物：                                                    │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ 林晓（主角）  妻子，35岁，普通职员  [编辑]              │  │
+│  │ 陈明（配角）  失踪丈夫，真实状态成谜  [编辑]            │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                               │
+│  事件时间线：[可编辑 textarea]                                 │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ 三年前丈夫出差后失联，警方立案未破。近日林晓收到一封... │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                               │
+│  引子场景：[可编辑]                                            │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ 深夜，林晓颤抖着拆开信封，里面是丈夫的笔迹…            │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                               │
+│  免费部分情节点：[可拖拽排序/编辑]                             │
+│  • 林晓独自抚养的三年生活与心理变化                           │
+│  • 信件内容揭示与警方重新介入                                  │
+│  • 真相逐渐浮出，各方反应升级                                  │
+│                                                               │
+│  卡点设计：[可编辑]                                            │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ 信里说的那个地方，正是丈夫最后消失前去过的地方…         │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                               │
+│  付费揭示内容：[可编辑]                                        │
+│  ┌─────────────────────────────────────────────────────────┐  │
+│  │ 丈夫是否真的死去，信件背后隐藏的真实身份…               │  │
+│  └─────────────────────────────────────────────────────────┘  │
+│                                                               │
+│        [取消任务]   [保存修改]   [确认规划，开始生成正文]      │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ### 11.3.6 文章编辑/审核 `/dashboard/article/[id]`

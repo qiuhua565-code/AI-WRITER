@@ -1,0 +1,25 @@
+标题：{{ title }}
+
+主要人物：
+{% for c in plan.key_characters %}
+- {{ c.name }}（{{ c.role }}）：{{ c.background }}
+{% endfor %}
+
+事件时间线：{{ plan.event_timeline }}
+
+免费部分需覆盖的情节点：
+{% for beat in plan.free_part_beats %}
+- {{ beat }}
+{% endfor %}
+
+【引子内容，供衔接】
+{{ intro_text }}
+
+请写免费部分（约 {{ target_words }} 字）：
+- 承接引子，迅速介绍人物背景和事件基本情况（简要，不拖沓）
+- 聚焦矛盾冲突，快速推进情节
+- 分段用数字编号（01、02、03），不超过 5 段
+- 不写事件结局或付费内容中的关键真相
+- 结尾在悬念最强处停下，为卡点做铺垫
+
+直接输出免费部分正文：

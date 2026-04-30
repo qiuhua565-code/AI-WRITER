@@ -582,4 +582,119 @@ async def _assemble(self, task: Task):
 }
 ```
 
+---
+
+## 4.10 情感故事模板（emotion_story）
+
+工作室当前主要生产"情感故事/社会事件叙事"类内容，与通用小说结构不同，由 `tasks.config.template = "emotion_story"` 触发独立编排逻辑。
+
+### 4.10.1 与通用小说的核心差异
+
+| 维度 | 通用小说（默认）| 情感故事（emotion_story）|
+|---|---|---|
+| 生成结构 | 大纲 → N 章（5-10章）| 规划 → 引子 → 免费部分 → 卡点 → 付费部分（固定4段）|
+| 总字数 | 1-3 万字 | 4000-5000 字 |
+| 目标读者 | 通用 | 40 岁以上，偏好猎奇刺激 |
+| 内容性质 | 纯虚构 | 真实事件小说化改编 |
+| 输出格式 | 章节 markdown | 标题 + 声明 + 4 个固定分区 |
+| 付费分割 | 无 | 有明确的卡点（付费墙）|
+| 大纲审核 | 可选（need_outline_review）| 可选（need_plan_review）|
+
+### 4.10.2 情感故事生成流程
+
+```
+[输入] task: { title, material?, template="emotion_story", ...config }
+   │
+   ▼
+┌─────────────────────────────────────────┐
+│ Step 1: 故事规划                         │
+│   Input:  title + material(可选)        │
+│   Output: plan JSON                     │
+│           { story_type, core_conflict,  │
+│             key_characters,             │
+│             event_timeline,             │
+│             dramatic_scene,             │
+│             free_part_beats,            │
+│             paywall_hook,               │
+│             paid_part_revelation }      │
+│   Calls:  1 次 LLM                      │
+└─────────────────────────────────────────┘
+   │
+   ├──→ [Gate] need_plan_review = true → 暂停，用户确认/修改规划
+   │
+   ▼
+┌─────────────────────────────────────────┐
+│ Step 2: 生成引子（segment index=1）      │
+│   约 200 字，以最戏剧性场景开篇          │
+│   Calls: 1 次 LLM                       │
+└─────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────┐
+│ Step 3: 生成免费部分（segment index=2） │
+│   约 3000 字，分段编号，结尾留悬念       │
+│   可能触发续写（finish_reason='length'）│
+│   Calls: 1-3 次 LLM                     │
+└─────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────┐
+│ Step 4: 生成卡点（segment index=3）     │
+│   约 120 字，付费分割点                  │
+│   Calls: 1 次 LLM                       │
+└─────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────┐
+│ Step 5: 生成付费部分（segment index=4） │
+│   约 2000 字，揭示真相和隐藏细节         │
+│   可能触发续写                           │
+│   Calls: 1-2 次 LLM                     │
+└─────────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────────┐
+│ Step 6: 组装                            │
+│   按"回顾：标题 + 声明 + 4段"格式拼接  │
+│   status = 'review'                     │
+└─────────────────────────────────────────┘
+```
+
+### 4.10.3 编排器入口判断
+
+```python
+async def run(self, task_id: int):
+    task = await self.db.get_task(task_id)
+    
+    template = task.config.get('template', 'fiction')
+    
+    if template == 'emotion_story':
+        await EmotionStoryOrchestrator(self.llm, self.db, self.redis).run(task)
+    else:
+        await FictionOrchestrator(self.llm, self.db, self.redis).run(task)
+```
+
+`EmotionStoryOrchestrator` 与 `FictionOrchestrator` 共享：
+- LLM Client（含重试、降级、Key 管理）
+- Redis Stream 推送逻辑
+- 控制信号检查（pause/cancel）
+- 事件记录（task_events）
+
+差异仅在 prompt 选取和 segments 结构。
+
+### 4.10.4 情感故事 Segment 结构
+
+| index | segment_type | 目标字数 | 说明 |
+|---|---|---|---|
+| 1 | `intro` | 200 | 引子 |
+| 2 | `free` | 3000 | 免费部分 |
+| 3 | `paywall` | 120 | 卡点 |
+| 4 | `paid` | 2000 | 付费部分 |
+
+`segment_type` 字段需在 `segments` 表中新增（见 09-data-model.md 备注）。
+
+### 4.10.5 Prompt 详情
+
+见 [附录 A.10](./appendix/prompts.md#a10-情感故事模板emotion_story)。
+
 部分字段可由用户在批量提交页选择，部分使用系统默认。详见 [appendix/config.md](./appendix/config.md)。

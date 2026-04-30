@@ -1,0 +1,120 @@
+version: "3.9"
+
+# ── Shared environment ────────────────────────────────────────────────────────
+x-backend-env: &backend-env
+  SECRET_KEY: ${SECRET_KEY:-change-me-generate-with-openssl-rand-hex-32}
+  DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/aistoryflow
+  REDIS_URL: redis://redis:6379/0
+  JWT_ALGORITHM: HS256
+  JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-10080}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://your-proxy.com/v1}
+  LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-3-5-sonnet-20241022}
+  LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-claude-3-5-haiku-20241022}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-15}
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: aistoryflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── DB migrations (run once on start) ────────────────────────────────────
+  migrate:
+    build:
+      context: ./backend
+    restart: "no"
+    environment:
+      <<: *backend-env
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      DEBUG: "false"
+    ports:
+      - "8000:8000"
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0 --port 8000
+      --workers 2
+      --loop asyncio
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # ── Celery worker ─────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    command: >
+      celery -A app.celery_app.celery_app worker
+      --loglevel=info
+      --pool=gevent
+      --concurrency=${CELERY_WORKER_CONCURRENCY:-15}
+      --queues=celery
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    # Scale out: docker compose up --scale worker=2
+    deploy:
+      replicas: 1
+
+  # ── Next.js frontend ──────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./front
+      args:
+        NEXT_PUBLIC_APP_NAME: "AI-StoryFlow"
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://api:8000
+      NEXT_PUBLIC_APP_NAME: AI-StoryFlow
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:
