@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd.exe:*)",
+      "Read(//c/Users/Administrator/Desktop/**)",
+      "Bash(python3 -c ':*)",
+      "Bash(python read_docx.py)",
+      "Bash(pip --version)",
+      "Bash(uv --version)",
+      "Bash(pnpm install:*)",
+      "Bash(where pnpm:*)",
+      "Read(//c/Users/Administrator/AppData/Roaming/npm/**)",
+      "Bash(pip install:*)",
+      "Read(//c/Users/Administrator/AppData/Local/**)",
+      "Read(//c/Program Files/nodejs//**)",
+      "Bash(npm --version)",
+      "Bash(npx pnpm:*)",
+      "Bash(corepack enable:*)",
+      "Bash(alembic init:*)",
+      "Bash(npm install:*)",
+      "Bash(python:*)",
+      "Bash(export PATH=\"/c/Users/Administrator/AppData/Roaming/npm:$PATH\")",
+      "Bash(pnpm --version)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm exec:*)",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(python3:*)"
+    ]
+  }
+}
