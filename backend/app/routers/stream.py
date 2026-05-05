@@ -46,6 +46,10 @@ BLOCK_MS = 5000   # 5 s
 KEEPALIVE_INTERVAL = 20
 # Stop streaming after task reaches one of these terminal states
 TERMINAL_STATUSES = {"review", "approved", "failed", "cancelled"}
+# Token events: read one at a time for real-time feel
+# Non-token events: can batch since they're infrequent
+TOKEN_READ_COUNT = 1
+BATCH_READ_COUNT = 10
 
 
 @router.get("/{task_id}/stream")
@@ -72,7 +76,8 @@ async def stream_task(
         _event_generator(request, redis, task_id, last_event_id, task.status),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # disable nginx buffering
         },
     )
@@ -99,6 +104,7 @@ async def _event_generator(
 
     keepalive_counter = 0
     current_status = initial_status
+    catching_up = True   # True = draining historical entries in bulk
 
     try:
         while True:
@@ -106,14 +112,19 @@ async def _event_generator(
             if await request.is_disconnected():
                 break
 
+            # When catching up on history use larger batch; once live use 1
+            read_count = BATCH_READ_COUNT if catching_up else TOKEN_READ_COUNT
+
             # Read new entries from the Redis Stream
             entries = await redis.xread(
                 {stream_key: start_id},
-                count=50,
+                count=read_count,
                 block=BLOCK_MS if not is_terminal else 0,
             )
 
             if not entries:
+                # No more historical data — we're now live
+                catching_up = False
                 # Timeout – send keepalive comment
                 keepalive_counter += 1
                 if keepalive_counter * (BLOCK_MS / 1000) >= KEEPALIVE_INTERVAL:
@@ -124,6 +135,11 @@ async def _event_generator(
                     # No more data and task is done – close stream
                     break
                 continue
+
+            # If we got fewer entries than requested, we've caught up
+            total_received = sum(len(msgs) for _, msgs in entries)
+            if total_received < read_count:
+                catching_up = False
 
             keepalive_counter = 0
             # entries = [(stream_key, [(entry_id, {field: value, ...}), ...])]
@@ -142,9 +158,7 @@ async def _event_generator(
                     payload = dict(fields)
                     data_str = json.dumps(payload, ensure_ascii=False)
 
-                    yield f"id: {entry_id}\n"
-                    yield f"event: {event_type}\n"
-                    yield f"data: {data_str}\n\n"
+                    yield f"id: {entry_id}\nevent: {event_type}\ndata: {data_str}\n\n"
 
             if is_terminal:
                 # Drain any remaining buffered entries then close

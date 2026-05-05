@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import BigInteger, Text, Integer, ForeignKey, TIMESTAMP, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -48,13 +48,13 @@ class Segment(Base):
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, default=datetime.utcnow
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
     # Relationships
@@ -90,7 +90,7 @@ class SegmentVersion(Base):
     # {instruction, selection_range, ...}
 
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, default=datetime.utcnow
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 
     # Relationships

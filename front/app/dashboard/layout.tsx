@@ -11,26 +11,25 @@ import {
   LogOut,
   Menu,
   X,
-  User,
-  ChevronDown,
   Key,
+  KeyRound,
+  Shield,
+  MessageSquare,
+  Users,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { useAuthStore } from "@/lib/store/auth"
 
 const sidebarItems = [
   { href: "/dashboard", label: "任务列表", icon: LayoutDashboard },
   { href: "/dashboard/new", label: "创建任务", icon: Plus },
+  { href: "/dashboard/chat", label: "AI 对话", icon: MessageSquare },
 ]
+
+const shellCard =
+  "rounded-2xl border border-slate-200/60 bg-white shadow-sm shadow-slate-900/[0.04] ring-1 ring-slate-100/80"
 
 export default function DashboardLayout({
   children,
@@ -40,15 +39,16 @@ export default function DashboardLayout({
   const pathname = usePathname()
   const router = useRouter()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const { user, clearAuth } = useAuthStore()
+  const { user, clearAuth, hasHydrated } = useAuthStore()
+  const isChatRoute = pathname.startsWith("/dashboard/chat")
 
-  // Client-side auth guard
   useEffect(() => {
-    if (!user) {
+    if (hasHydrated && !user) {
       router.replace("/login")
     }
-  }, [user, router])
+  }, [user, router, hasHydrated])
 
+  if (!hasHydrated) return null
   if (!user) return null
 
   const handleLogout = () => {
@@ -58,113 +58,216 @@ export default function DashboardLayout({
 
   const initials = user.email.slice(0, 2).toUpperCase()
 
-  return (
-    <div className="min-h-screen bg-background">
-      {/* Top Navigation */}
-      <header className="sticky top-0 z-50 border-b border-border bg-card/80 backdrop-blur-sm">
-        <div className="flex h-16 items-center justify-between px-4 lg:px-6">
-          {/* Left: Logo & Mobile Menu */}
-          <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="lg:hidden"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-            >
-              {sidebarOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-            </Button>
-            <Link href="/dashboard" className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-                <FileText className="h-4 w-4 text-primary-foreground" />
-              </div>
-              <span className="text-lg font-semibold text-foreground">AI-StoryFlow</span>
-            </Link>
+  if (isChatRoute) {
+    return (
+      <div className="min-h-[100dvh] bg-page-cream text-foreground">{children}</div>
+    )
+  }
+
+  const SidebarBody = () => (
+    <>
+      <div className={cn(shellCard, "p-4")}>
+        <div className="flex items-start gap-3">
+          <Avatar className="h-12 w-12 border border-slate-100 shadow-sm">
+            <AvatarFallback className="bg-gradient-to-br from-violet-100 to-amber-100 text-sm font-semibold text-slate-700">
+              {initials}
+            </AvatarFallback>
+          </Avatar>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold text-slate-900">{user.email}</p>
+            <p className="mt-0.5 text-xs text-slate-500">AI-StoryFlow 工作台</p>
+            {user.role === "admin" && (
+              <span className="mt-2 inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-800">
+                管理员
+              </span>
+            )}
           </div>
-
-          {/* Right: User Menu */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="flex items-center gap-2 px-2">
-                <Avatar className="h-8 w-8">
-                  <AvatarFallback>{initials}</AvatarFallback>
-                </Avatar>
-                <span className="hidden text-sm font-medium sm:inline-block">
-                  {user.email}
-                </span>
-                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuItem asChild>
-                <Link href="/settings/llm-key">
-                  <Key className="mr-2 h-4 w-4" />
-                  API Key 配置
-                </Link>
-              </DropdownMenuItem>
-              <DropdownMenuItem asChild>
-                <Link href="/settings/password">
-                  <Settings className="mr-2 h-4 w-4" />
-                  修改密码
-                </Link>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-destructive"
-                onClick={handleLogout}
-              >
-                <LogOut className="mr-2 h-4 w-4" />
-                退出登录
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
         </div>
-      </header>
-
-      <div className="flex">
-        {/* Sidebar */}
-        <aside
-          className={cn(
-            "fixed inset-y-0 left-0 z-40 mt-16 w-64 transform border-r border-border bg-card transition-transform duration-200 lg:static lg:translate-x-0",
-            sidebarOpen ? "translate-x-0" : "-translate-x-full"
-          )}
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-4 w-full rounded-xl border-slate-200 text-slate-700"
+          onClick={handleLogout}
         >
-          <nav className="flex flex-col gap-1 p-4">
-            {sidebarItems.map((item) => {
-              const isActive = pathname === item.href
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  onClick={() => setSidebarOpen(false)}
-                  className={cn(
-                    "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
-                    isActive
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-                  )}
-                >
-                  <item.icon className="h-4 w-4" />
-                  {item.label}
-                </Link>
-              )
-            })}
-          </nav>
+          <LogOut className="mr-2 h-4 w-4" />
+          退出登录
+        </Button>
+      </div>
+
+      <nav className={cn(shellCard, "p-2")} aria-label="主导航">
+        {sidebarItems.map((item) => {
+          const isActive = pathname === item.href
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={() => setSidebarOpen(false)}
+              className={cn(
+                "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all",
+                isActive
+                  ? "bg-amber-50/90 text-slate-900 ring-1 ring-amber-200/60"
+                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+              )}
+            >
+              <item.icon className="h-4 w-4 shrink-0 opacity-80" />
+              {item.label}
+            </Link>
+          )
+        })}
+      </nav>
+
+      <div className={cn(shellCard, "space-y-0.5 p-2")}>
+        <p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-slate-400">
+          账户
+        </p>
+        <Link
+          href="/settings/llm-key"
+          onClick={() => setSidebarOpen(false)}
+          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-slate-600 hover:bg-slate-50"
+        >
+          <Key className="h-4 w-4" />
+          API Key
+        </Link>
+        <Link
+          href="/settings/password"
+          onClick={() => setSidebarOpen(false)}
+          className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-slate-600 hover:bg-slate-50"
+        >
+          <Settings className="h-4 w-4" />
+          修改密码
+        </Link>
+      </div>
+
+      {user.role === "admin" && (
+        <div className={cn(shellCard, "space-y-0.5 p-2")}>
+          <p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-slate-400">
+            系统管理
+          </p>
+          <Link
+            href="/dashboard/admin"
+            onClick={() => setSidebarOpen(false)}
+            className={cn(
+              "flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition-colors",
+              pathname === "/dashboard/admin"
+                ? "bg-amber-50/90 font-medium text-slate-900 ring-1 ring-amber-200/60"
+                : "text-slate-600 hover:bg-slate-50"
+            )}
+          >
+            <Shield className="h-4 w-4 shrink-0" />
+            管理概览
+          </Link>
+          <Link
+            href="/dashboard/admin/users"
+            onClick={() => setSidebarOpen(false)}
+            className={cn(
+              "flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition-colors",
+              pathname.startsWith("/dashboard/admin/users")
+                ? "bg-amber-50/90 font-medium text-slate-900 ring-1 ring-amber-200/60"
+                : "text-slate-600 hover:bg-slate-50"
+            )}
+          >
+            <Users className="h-4 w-4 shrink-0" />
+            用户管理
+          </Link>
+          <Link
+            href="/dashboard/admin/api-keys"
+            onClick={() => setSidebarOpen(false)}
+            className={cn(
+              "flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition-colors",
+              pathname.startsWith("/dashboard/admin/api-keys")
+                ? "bg-amber-50/90 font-medium text-slate-900 ring-1 ring-amber-200/60"
+                : "text-slate-600 hover:bg-slate-50"
+            )}
+          >
+            <KeyRound className="h-4 w-4 shrink-0" />
+            系统 Key 池
+          </Link>
+        </div>
+      )}
+    </>
+  )
+
+  return (
+    <div className="min-h-screen bg-page-cream text-foreground">
+      <div className="flex min-h-screen">
+        {/* 桌面侧栏 */}
+        <aside className="relative z-20 hidden w-[272px] shrink-0 flex-col gap-3 p-4 lg:flex">
+          <Link
+            href="/dashboard"
+            className="mb-1 flex items-center gap-2 px-1"
+          >
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
+              <FileText className="h-4 w-4" />
+            </div>
+            <span className="text-lg font-semibold tracking-tight text-slate-900">AI-StoryFlow</span>
+          </Link>
+          <SidebarBody />
         </aside>
 
-        {/* Mobile Overlay */}
-        {sidebarOpen && (
-          <div
-            className="fixed inset-0 z-30 bg-background/80 backdrop-blur-sm lg:hidden"
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
+        {/* 主区 */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-amber-200/30 bg-page-cream/90 px-4 backdrop-blur-md lg:hidden">
+            <div className="flex items-center gap-2 min-w-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="shrink-0 rounded-xl"
+                onClick={() => setSidebarOpen(true)}
+                aria-label="打开菜单"
+              >
+                <Menu className="h-5 w-5" />
+              </Button>
+              <Link href="/dashboard" className="flex min-w-0 items-center gap-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white">
+                  <FileText className="h-3.5 w-3.5" />
+                </div>
+                <span className="truncate font-semibold text-slate-900">AI-StoryFlow</span>
+              </Link>
+            </div>
+          </header>
 
-        {/* Main Content */}
-        <main className={cn(
-          "flex-1",
-          pathname.startsWith("/dashboard/article/") ? "" : "p-4 lg:p-6"
-        )}>{children}</main>
+          <main
+            className={cn(
+              "flex-1",
+              pathname.startsWith("/dashboard/article/") || pathname.startsWith("/dashboard/chat")
+                ? ""
+                : "p-4 pb-8 sm:p-6"
+            )}
+          >
+            {children}
+          </main>
+        </div>
       </div>
+
+      {/* 移动侧栏抽屉 */}
+      {sidebarOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-slate-900/20 backdrop-blur-sm lg:hidden"
+            onClick={() => setSidebarOpen(false)}
+            aria-hidden
+          />
+          <aside
+            className={cn(
+              "fixed inset-y-0 left-0 z-50 flex w-[min(100%,300px)] flex-col gap-3 overflow-y-auto bg-page-cream p-4 shadow-2xl lg:hidden"
+            )}
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold text-slate-800">菜单</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="rounded-xl"
+                onClick={() => setSidebarOpen(false)}
+                aria-label="关闭"
+              >
+                <X className="h-5 w-5" />
+              </Button>
+            </div>
+            <SidebarBody />
+          </aside>
+        </>
+      )}
     </div>
   )
 }

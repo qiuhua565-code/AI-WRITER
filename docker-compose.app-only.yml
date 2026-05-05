@@ -1,0 +1,83 @@
+# 应用栈：不包含 Postgres/Redis 容器，连接「宿主机或局域网」上已存在的库（例如宝塔 Docker 应用商店装的 PG/Redis）。
+# 用法（在项目根目录、与 docker-compose.yml 同级）：
+#   1. 先装好宿主机上的 Postgres、Redis，并写好根目录 .env（见 deploy.env.example）
+#   2. docker compose -f docker-compose.app-only.yml up -d --build
+#
+# Linux 下容器访问宿主机：使用 host.docker.internal（需下方 extra_hosts）
+
+version: "3.9"
+
+x-backend-env: &backend-env
+  SECRET_KEY: ${SECRET_KEY}
+  DATABASE_URL: ${DATABASE_URL}
+  REDIS_URL: ${REDIS_URL}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-10080}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://api.anthropic.com/v1}
+  LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-sonnet-4-6}
+  LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-claude-sonnet-4-5-20251001}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  CELERY_WORKER_CONCURRENCY: ${CELERY_WORKER_CONCURRENCY:-15}
+
+services:
+  migrate:
+    build:
+      context: ./backend
+    restart: "no"
+    environment:
+      <<: *backend-env
+    command: alembic upgrade head
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  api:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      DEBUG: "false"
+    ports:
+      - "8000:8000"
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0 --port 8000
+      --workers 2
+      --loop asyncio
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    command: >
+      celery -A app.celery_app.celery_app worker
+      --loglevel=info
+      --pool=gevent
+      --concurrency=${CELERY_WORKER_CONCURRENCY:-15}
+      --queues=celery
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./front
+      args:
+        NEXT_PUBLIC_APP_NAME: "AI-StoryFlow"
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://api:8000
+      NEXT_PUBLIC_APP_NAME: AI-StoryFlow
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api

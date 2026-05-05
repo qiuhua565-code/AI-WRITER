@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import BigInteger, Text, Integer, Boolean, ForeignKey, TIMESTAMP, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -57,13 +57,13 @@ class Task(Base):
 
     # 时间
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, default=datetime.utcnow
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
@@ -75,3 +75,6 @@ class Task(Base):
     )
     events: Mapped[list["TaskEvent"]] = relationship("TaskEvent", back_populates="task")
     messages: Mapped[list["Message"]] = relationship("Message", back_populates="task")
+    versions: Mapped[list["ArticleVersion"]] = relationship(
+        "ArticleVersion", back_populates="task", order_by="ArticleVersion.created_at.desc()"
+    )

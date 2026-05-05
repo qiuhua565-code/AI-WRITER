@@ -25,7 +25,7 @@ export interface SegmentInfo {
   id: number
   index: number
   title: string
-  segment_type: 'intro' | 'free' | 'paywall' | 'paid'
+  segment_type: 'chapter_1' | 'chapter_2' | 'chapter_3' | 'chapter_4' | 'chapter_5' | 'chapter_6' | 'chapter_7' | 'chapter_8' | 'chapter_9' | 'chapter_10' | 'chapter_11' | 'chapter_12' | 'epilogue'
   status: string
   word_count: number
   target_word_count: number
@@ -53,6 +53,8 @@ export interface TaskListItem {
   completed_at?: string | null
   error_msg?: string | null
   warning_msg?: string | null
+  /** 与后端 Task.config 一致，列表接口也会返回 */
+  config?: Record<string, unknown>
 }
 
 export interface TaskDetail extends TaskListItem {

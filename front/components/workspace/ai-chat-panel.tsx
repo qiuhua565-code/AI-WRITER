@@ -113,33 +113,36 @@ export function AIChatPanel() {
                 message.role === "user" ? "items-end" : "items-start"
               )}>
                 <div className={cn(
-                  "rounded-2xl px-4 py-2.5 text-sm",
-                  message.role === "assistant" 
-                    ? "bg-muted text-foreground rounded-tl-sm" 
-                    : "bg-primary text-primary-foreground rounded-tr-sm"
+                  "rounded-2xl px-4 py-2.5 text-sm select-text",
+                  message.role === "assistant"
+                    ? "bg-muted text-foreground rounded-tl-sm"
+                    : "bg-muted text-foreground rounded-tr-sm border border-border/50"
                 )}>
-                  <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                  <p className="whitespace-pre-wrap leading-relaxed select-text">{message.content}</p>
                 </div>
-                
-                {/* Message Actions for AI */}
-                {message.role === "assistant" && (
-                  <div className="flex items-center gap-1 mt-1.5">
-                    <span className="text-[10px] text-muted-foreground mr-1">{message.timestamp}</span>
-                    <Button variant="ghost" size="icon" className="h-6 w-6">
-                      <Copy className="h-3 w-3" />
-                    </Button>
-                    <Button variant="ghost" size="icon" className="h-6 w-6">
-                      <ThumbsUp className="h-3 w-3" />
-                    </Button>
-                    <Button variant="ghost" size="icon" className="h-6 w-6">
-                      <RotateCcw className="h-3 w-3" />
-                    </Button>
-                  </div>
-                )}
-                
-                {message.role === "user" && (
-                  <span className="text-[10px] text-muted-foreground mt-1">{message.timestamp}</span>
-                )}
+
+                {/* Message Actions */}
+                <div className="flex items-center gap-1 mt-1.5">
+                  <span className="text-[10px] text-muted-foreground mr-1">{message.timestamp}</span>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={() => navigator.clipboard.writeText(message.content)}
+                  >
+                    <Copy className="h-3 w-3" />
+                  </Button>
+                  {message.role === "assistant" && (
+                    <>
+                      <Button variant="ghost" size="icon" className="h-6 w-6">
+                        <ThumbsUp className="h-3 w-3" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-6 w-6">
+                        <RotateCcw className="h-3 w-3" />
+                      </Button>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           ))}

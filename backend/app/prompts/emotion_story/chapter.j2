@@ -1,0 +1,30 @@
+标题：《{{ title }}》
+
+整体时间线：{{ plan.overall_timeline }}
+悬念布局：{{ plan.suspense_architecture }}
+
+主要人物：
+{% for c in plan.key_characters %}
+- {{ c.name }}（{{ c.role }}）：{{ c.background }}
+{% endfor %}
+
+本章（第 {{ chapter.index }} 章）任务：{{ chapter.goal }}
+本章关键场景：
+{% for s in chapter.key_scenes %}
+- {{ s }}
+{% endfor %}
+本章暂不透露：{{ chapter.what_to_hide }}
+本章结尾悬念：{{ chapter.end_hook }}
+
+【上一章结尾（供衔接，请从此处自然延续）】
+{{ prev_tail }}
+
+请写第 {{ chapter.index }} 章（约 {{ target_words }} 字）：
+- 从上一章结尾自然承接，保持人物口吻和叙事节奏的一致性
+- 严格按本章任务推进情节，不提前透露"暂不透露"的内容
+- 每一场景都要有戏剧张力，避免流水账式叙述
+- 分段自然，每段控制在 300-500 字，段落间空一行，不加任何数字编号或小标题
+- 章末以本章悬念钩子收尾
+- 目标约 {{ target_words }} 字
+
+直接输出本章正文（不要写"第X章"标题，直接从正文开始）：

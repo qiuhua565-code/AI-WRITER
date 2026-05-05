@@ -1,6 +1,10 @@
 FROM node:20-alpine AS base
 WORKDIR /app
 
+# 国内构建常因拉 pnpm/npm 超时失败，显式镜像（服务器在海外可删这两行 ENV）
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 

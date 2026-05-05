@@ -1,12 +1,20 @@
 from datetime import datetime
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
 class EmotionStoryConfig(BaseModel):
     template: str = "emotion_story"
-    target_words: int = Field(default=4500, ge=4000, le=5500)
-    writing_model: str = "claude-3-5-sonnet-20241022"
+    # 未传则按 18000；传了则 10000–25000（成稿总目标，章节字数按比例分配）
+    target_words: Optional[int] = Field(default=None, ge=10000, le=25000)
+    writing_model: str = "claude-sonnet-4-6"
     need_plan_review: bool = False
+    # 从文件导入的基础指令（长模板），与短提示分开存
+    instruction_doc_text: str = ""
+    instruction_doc_filename: str = ""
+    # 用户手写的补充提示（短）
+    batch_prompt: str = ""
 
 
 class BatchCreateRequest(BaseModel):
@@ -35,7 +43,13 @@ class TaskListItem(BaseModel):
     id: int
     title: str
     status: str
+    progress: int = 0
     word_count: int | None
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    total_llm_calls: int = 0
+    error_msg: str | None = None
+    warning_msg: str | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None
@@ -55,6 +69,10 @@ class TaskDetailResponse(BaseModel):
     id: int
     title: str
     status: str
+    progress: int = 0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    total_llm_calls: int = 0
     config: dict
     outline: dict | None  # 对应 Task.outline 字段（模型中实际字段名为 outline）
     content: str | None

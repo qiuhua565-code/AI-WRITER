@@ -11,7 +11,7 @@ from app.schemas.auth import (
     UserMeResponse,
 )
 from app.utils.security import (
-    verify_password,
+    verify_password_async,
     create_access_token,
     hash_password,
     encrypt_api_key,
@@ -27,12 +27,15 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
-    if not user or not verify_password(body.password, user.password_hash):
+    if not user or not await verify_password_async(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="邮箱或密码错误")
     if user.status != "active":
         raise HTTPException(status_code=403, detail="账号已被禁用")
     token = create_access_token({"sub": str(user.id), "role": user.role})
-    return TokenResponse(access_token=token, user_id=user.id, name=user.name, role=user.role)
+    return TokenResponse(
+        access_token=token,
+        user=UserMeResponse.model_validate(user),
+    )
 
 
 @router.get("/me", response_model=UserMeResponse)
@@ -46,7 +49,7 @@ async def update_password(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if not verify_password(body.current_password, current_user.password_hash):
+    if not await verify_password_async(body.current_password, current_user.password_hash):
         raise HTTPException(status_code=400, detail="当前密码错误")
     current_user.password_hash = hash_password(body.new_password)
     await db.commit()

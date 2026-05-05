@@ -4,6 +4,10 @@ from app.config import settings
 from app.routers.auth import router as auth_router
 from app.routers.tasks import router as tasks_router
 from app.routers.stream import router as stream_router
+from app.routers.admin import router as admin_router
+from app.routers.admin_api_keys import router as admin_api_keys_router
+from app.routers.api_keys import router as api_keys_router
+from app.routers.chat import router as chat_router
 
 app = FastAPI(
     title="AI-StoryFlow API",
@@ -13,8 +17,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -22,6 +26,10 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(tasks_router)
 app.include_router(stream_router)
+app.include_router(admin_router)
+app.include_router(admin_api_keys_router)
+app.include_router(api_keys_router)
+app.include_router(chat_router)
 
 
 @app.get("/health")

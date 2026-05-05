@@ -24,7 +24,31 @@
       "Bash(pnpm add:*)",
       "Bash(pnpm exec:*)",
       "Bash(node_modules/.bin/tsc --noEmit)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(py -3 -c \"import secrets; print\\(secrets.token_hex\\(32\\)\\); print\\(secrets.token_hex\\(32\\)\\)\")",
+      "Bash(grep -E \"\\\\.\\(env|py|toml|json|yml|yaml\\)$\")",
+      "Bash(py -3 --version)",
+      "Bash(py -3 -m pip --version)",
+      "Bash(where node *)",
+      "Bash(py -3 -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(grep -E \"\\\\.\\(env|py|toml|cfg|ini|yml|yaml\\)$\")",
+      "Bash(npx tsc *)",
+      "Bash(py -c \"import ast; ast.parse\\(open\\('app/routers/tasks.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(py *)",
+      "Bash(pip show *)",
+      "Bash(\"D:/AIwRITE/AI-WRITER/backend/.venv/Scripts/pip\" install *)",
+      "Bash(D:/AIwRITE/AI-WRITER/backend/.venv/Scripts/python *)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Read(//d/viddery/viddery/**)",
+      "Read(//d/viddery/**)",
+      "Bash(.venvScriptspython.exe -c ' *)",
+      "Bash(redis-cli *)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import asyncio; import redis.asyncio as aioredis; async def run\\(\\): r = await aioredis.from_url\\('redis://:123456@47.100.234.21:6379/0'\\); result = await r.delete\\('task:37:stream'\\); print\\(f'Deleted {result} key\\(s\\)'\\); await r.aclose\\(\\); asyncio.run\\(run\\(\\)\\)\")",
+      "Bash(cmd *)",
+      "Bash(powershell *)",
+      "Bash(dir D:\\\\AIwRITE\\\\AI-WRITER\\\\front\\\\src /s /b)",
+      "Bash(cd /d D:\\\\AIwRITE\\\\AI-WRITER\\\\backend)",
+      "Bash(.venv\\\\Scripts\\\\python.exe scripts\\\\add_purpose_column.py)"
     ]
   }
 }

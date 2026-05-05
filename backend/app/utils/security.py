@@ -1,16 +1,22 @@
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 import bcrypt
+import asyncio
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import os, secrets
 from app.config import settings
 
 # ─── 密码 ───────────────────────────────────────────────
+_BCRYPT_ROUNDS = 10
+
 def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt(_BCRYPT_ROUNDS)).decode()
 
 def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    return await asyncio.to_thread(verify_password, plain, hashed)
 
 # ─── JWT ────────────────────────────────────────────────
 def create_access_token(data: dict) -> str:
@@ -43,7 +49,7 @@ def decrypt_api_key(encrypted: bytes) -> str:
     return aesgcm.decrypt(nonce, ct, None).decode()
 
 def make_key_hint(key: str) -> str:
-    """显示给用户的脱敏提示，如 sk-...xK9p。"""
-    if len(key) <= 8:
+    """显示给用户的脱敏提示，如 sk-PxABsMKg****A9lf。"""
+    if len(key) <= 12:
         return "****"
-    return f"{key[:3]}...{key[-4:]}"
+    return f"{key[:8]}****{key[-4:]}"

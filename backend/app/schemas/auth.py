@@ -7,9 +7,7 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    user_id: int
-    name: str
-    role: str
+    user: "UserMeResponse"
 
 class UpdatePasswordRequest(BaseModel):
     current_password: str

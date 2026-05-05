@@ -1,0 +1,26 @@
+标题：《{{ title }}》
+
+核心冲突：{{ plan.core_conflict }}
+主要人物：
+{% for c in plan.key_characters %}
+- {{ c.name }}（{{ c.role }}）：{{ c.background }}
+{% endfor %}
+
+本章任务：{{ chapter.goal }}
+本章关键场景：
+{% for s in chapter.key_scenes %}
+- {{ s }}
+{% endfor %}
+本章暂不透露：{{ chapter.what_to_hide }}
+本章结尾悬念：{{ chapter.end_hook }}
+
+请写第一章（约 {{ target_words }} 字）：
+- 直接从最具冲击力、最戏剧性的时刻开篇，绝不做背景铺垫
+- 用短句、强动词，让读者第一段就感到震撼或困惑
+- 快速制造"这到底发生了什么"的强烈好奇心
+- 人物关系和背景通过动作与对话隐约透露，不直接解释
+- 章末以悬念收尾，让读者必须继续读下去
+- 分段自然，每段控制在 300-500 字，段落间空一行，不加任何数字编号或小标题
+- 目标约 {{ target_words }} 字，字数上限约为目标的 115%
+
+直接输出第一章正文：

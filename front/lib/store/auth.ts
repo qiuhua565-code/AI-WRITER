@@ -2,7 +2,6 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { UserMe } from '../types'
 
-// Cookie helpers (non-httpOnly so middleware can read it for basic route protection)
 function setAuthCookie(token: string | null) {
   if (typeof document === 'undefined') return
   if (token) {
@@ -15,8 +14,10 @@ function setAuthCookie(token: string | null) {
 interface AuthState {
   token: string | null
   user: UserMe | null
+  hasHydrated: boolean
   setAuth: (token: string, user: UserMe) => void
   clearAuth: () => void
+  setHasHydrated: (v: boolean) => void
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -24,6 +25,7 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       token: null,
       user: null,
+      hasHydrated: false,
       setAuth: (token, user) => {
         setAuthCookie(token)
         set({ token, user })
@@ -32,13 +34,14 @@ export const useAuthStore = create<AuthState>()(
         setAuthCookie(null)
         set({ token: null, user: null })
       },
+      setHasHydrated: (v) => set({ hasHydrated: v }),
     }),
     {
       name: 'auth-storage',
       partialize: (state) => ({ token: state.token, user: state.user }),
       onRehydrateStorage: () => (state) => {
-        // Re-sync cookie after rehydration from localStorage
         if (state?.token) setAuthCookie(state.token)
+        state?.setHasHydrated(true)
       },
     }
   )

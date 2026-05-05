@@ -46,41 +46,58 @@ export function TaskList({ tasks, total }: TaskListProps) {
   const pendingReview = tasks.filter((t) => t.status === "review").length
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">我的任务</h1>
-          <p className="text-sm text-muted-foreground">
-            共 {total} 个任务
-            {pendingReview > 0 && `，${pendingReview} 个待审核`}
-          </p>
-        </div>
-        <Button asChild>
-          <Link href="/dashboard/new">
-            <Plus className="mr-2 h-4 w-4" />
-            创建任务
-          </Link>
-        </Button>
+    <div className="space-y-5">
+      {/* 公告条 —— 参考图顶部黄色提示 */}
+      <div className="rounded-2xl border border-amber-200/70 bg-amber-50/90 px-4 py-3 text-sm leading-relaxed text-amber-950 shadow-sm ring-1 ring-amber-100/80">
+        <span className="font-semibold">提示：</span>
+        任务提交后在后台排队生成；可在「任务列表」查看进度，完成后进入文章审核与编辑。
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-col gap-3 sm:flex-row">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <div className="relative overflow-hidden rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm shadow-slate-900/[0.04] ring-1 ring-slate-100 sm:p-7">
+        <div
+          className="pointer-events-none absolute -right-10 -top-10 h-36 w-36 rounded-full bg-violet-100/50 blur-2xl"
+          aria-hidden
+        />
+        <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 sm:text-3xl">
+              我的任务
+            </h1>
+            <p className="mt-1 text-sm text-slate-500">
+              共 {total} 个任务
+              {pendingReview > 0 && ` · ${pendingReview} 个待审核`}
+            </p>
+          </div>
+          <Button
+            asChild
+            size="lg"
+            className="shrink-0 rounded-full bg-orange-500 px-6 text-white shadow-md shadow-orange-500/25 hover:bg-orange-600"
+          >
+            <Link href="/dashboard/new">
+              <Plus className="mr-2 h-4 w-4" />
+              创建任务
+            </Link>
+          </Button>
+        </div>
+      </div>
+
+      {/* 搜索与筛选 —— 圆角搜索条 */}
+      <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-white p-3 shadow-sm ring-1 ring-slate-100 sm:flex-row sm:items-center">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <Input
             placeholder="搜索任务标题..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9"
+            className="h-11 rounded-full border-slate-200 bg-slate-50/80 pl-11 pr-4 shadow-inner shadow-slate-900/[0.03]"
           />
         </div>
         <Select
           value={statusFilter}
           onValueChange={(value) => setStatusFilter(value as TaskStatus | "all")}
         >
-          <SelectTrigger className="w-full sm:w-40">
-            <Filter className="mr-2 h-4 w-4" />
+          <SelectTrigger className="h-11 w-full rounded-full border-slate-200 bg-white sm:w-44">
+            <Filter className="mr-2 h-4 w-4 text-slate-500" />
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -95,7 +112,7 @@ export function TaskList({ tasks, total }: TaskListProps) {
 
       {/* Task Grid */}
       {filteredTasks.length > 0 ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid w-full auto-rows-min grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
           {filteredTasks.map((task) => (
             <TaskCard key={task.id} task={task} />
           ))}
