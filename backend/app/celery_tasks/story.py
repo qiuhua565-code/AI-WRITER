@@ -38,8 +38,9 @@ def run_story(self, task_id: int, user_id: int = None):
         _mark_task_failed(task_id, "未配置可用的 API Key：请在个人设置中绑定 LLM Key，或由管理员配置系统 Key 池")
         return
     except NoKeyAvailableError:
-        # Key 都在用，正常排队等待
+        # Key 都在用，正常排队等待（前端列表仍显示 queued，用 warning_msg 说明原因）
         logger.info("Task %s waiting for free key — retry in 60s", task_id)
+        _set_task_key_queue_waiting(task_id)
         raise self.retry(countdown=60)
     except Exception as exc:
         wait = min(30 * (self.request.retries + 1), 300)  # 最长等 5 分钟
@@ -68,6 +69,24 @@ def _is_task_too_old(task_id: int) -> bool:
             age = datetime.now(timezone.utc) - task.created_at.replace(tzinfo=timezone.utc)
             return age > timedelta(hours=_MAX_TASK_AGE_HOURS)
     return asyncio.run(_check())
+
+
+def _set_task_key_queue_waiting(task_id: int) -> None:
+    """用户绑定 Key 时不会走此分支；仅系统池抢锁失败时提示排队原因。"""
+
+    async def _do():
+        from app.database import AsyncSessionLocal
+        from app.models.task import Task
+        from app.utils.task_messages import KEY_QUEUE_WAITING_MSG
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
+            if task and task.status == "queued":
+                task.warning_msg = KEY_QUEUE_WAITING_MSG
+                await db.commit()
+
+    asyncio.run(_do())
 
 
 def _mark_task_failed(task_id: int, error_msg: str):

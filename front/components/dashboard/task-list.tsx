@@ -51,6 +51,9 @@ export function TaskList({ tasks, total }: TaskListProps) {
       <div className="rounded-2xl border border-amber-200/70 bg-amber-50/90 px-4 py-3 text-sm leading-relaxed text-amber-950 shadow-sm ring-1 ring-amber-100/80">
         <span className="font-semibold">提示：</span>
         任务提交后在后台排队生成；可在「任务列表」查看进度，完成后进入文章审核与编辑。
+        <span className="mt-1 block text-[13px] text-amber-900/90">
+          若多个任务长时间停在「排队中」，通常是<strong>系统写稿 API Key 已被其他任务占用</strong>（每把 Key 同时只跑一篇），不是容器数量不够；可增加「写稿」用途的系统 Key，或为用户绑定「生成」用途的个人 Key。
+        </span>
       </div>
 
       <div className="relative overflow-hidden rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm shadow-slate-900/[0.04] ring-1 ring-slate-100 sm:p-7">

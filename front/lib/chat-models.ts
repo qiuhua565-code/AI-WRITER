@@ -10,7 +10,17 @@ export const CHAT_MODEL_OPTIONS: ChatModelOption[] = [
   {
     id: 'claude-sonnet-4-6',
     label: 'Sonnet 4.6',
-    hint: '均衡：日常对话与写作',
+    hint: '与中转站上登记的 model id 须完全一致；与 Cherry 里选的模型名对齐可减少「能调不能答」',
+  },
+  {
+    id: 'claude-sonnet-4-5-20250929',
+    label: 'Sonnet 4.5',
+    hint: 'Cherry / aipipe 常见别名；若 4.6 行为异常可改选此项对比',
+  },
+  {
+    id: 'claude-3-5-sonnet-20241022',
+    label: 'Sonnet 3.5',
+    hint: '旧版官方风格 ID；部分中转映射不同，安全策略可能与 4.x 不一致',
   },
   {
     id: 'claude-opus-4-6',

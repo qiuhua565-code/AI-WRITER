@@ -27,6 +27,7 @@ import {
   RotateCw,
   Trash2,
   GitCompare,
+  ListChecks,
 } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
@@ -212,6 +213,12 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
   const [chatInput, setChatInput] = useState("")
   const [chatSending, setChatSending] = useState(false)
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
+
+  const [articleCheckOpen, setArticleCheckOpen] = useState(false)
+  const [articleCheckLoading, setArticleCheckLoading] = useState(false)
+  const [articleCheckReport, setArticleCheckReport] = useState("")
+  const [articleCheckModel, setArticleCheckModel] = useState("")
+  const [smartApplyLoadingIdx, setSmartApplyLoadingIdx] = useState<number | null>(null)
 
   // Version history panel
   const [versionsOpen, setVersionsOpen] = useState(false)
@@ -482,7 +489,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
   const handleApplyToArticle = useCallback(async (originalText: string, newText: string, label = "AI 辅助应用") => {
     const beforeContent = editableContent          // snapshot BEFORE change
     const updated = beforeContent.replace(originalText, newText)
-    if (updated === beforeContent) return          // text not found, nothing to do
+    if (updated === beforeContent) return false
     setEditableContent(updated)
     setHasUnsaved(false)
     try {
@@ -502,10 +509,148 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
       lastSavedContentRef.current = updated
       queryClient.invalidateQueries({ queryKey: ["task", task.id] })
       await fetchVersions()
+      return true
     } catch (err) {
       console.error(err)
+      return false
     }
   }, [editableContent, task.id, fetchVersions, queryClient])
+
+  const openArticleCheck = useCallback(() => {
+    setArticleCheckOpen(true)
+    setArticleCheckLoading(true)
+    setArticleCheckReport("")
+    setArticleCheckModel("")
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/v1/tasks/${task.id}/article-check`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+        })
+        if (!res.ok) {
+          const t = await res.text().catch(() => "")
+          let msg = `HTTP ${res.status}`
+          try {
+            const j = JSON.parse(t) as { detail?: unknown }
+            if (typeof j.detail === "string") msg = j.detail
+            else if (Array.isArray(j.detail))
+              msg = j.detail.map((d: { msg?: string }) => d.msg ?? "").filter(Boolean).join("; ")
+          } catch {
+            if (t) msg = t.slice(0, 500)
+          }
+          throw new Error(msg)
+        }
+        if (!res.body) throw new Error("无响应体")
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ""
+        let report = ""
+        let modelUsed = ""
+        const flushBlocks = (chunk: string) => {
+          buf += chunk
+          const parts = buf.split("\n\n")
+          buf = parts.pop() ?? ""
+          for (const block of parts) {
+            if (!block.includes("data:")) continue
+            for (const line of block.split("\n")) {
+              if (!line.startsWith("data:")) continue
+              const raw = line.slice(5).trim()
+              if (!raw) continue
+              let ev: { type?: string; error?: string; report?: string; model_used?: string }
+              try {
+                ev = JSON.parse(raw) as typeof ev
+              } catch {
+                continue
+              }
+              if (ev.type === "error") throw new Error(ev.error || "审阅失败")
+              if (ev.type === "done") {
+                report = ev.report ?? ""
+                modelUsed = ev.model_used ?? ""
+              }
+            }
+          }
+        }
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          flushBlocks(decoder.decode(value, { stream: true }))
+        }
+        flushBlocks(decoder.decode())
+        if (buf.trim()) flushBlocks("\n\n")
+
+        setArticleCheckReport(report.trim() || "（无返回内容）")
+        setArticleCheckModel(modelUsed.trim())
+      } catch (e) {
+        setArticleCheckReport(e instanceof Error ? e.message : "检查失败")
+      } finally {
+        setArticleCheckLoading(false)
+      }
+    })()
+  }, [task.id])
+
+  const trySmartApplyFromChat = useCallback(
+    async (assistantIndex: number) => {
+      const msgs = chatMessages
+      const asst = msgs[assistantIndex]
+      if (!asst || asst.role !== "assistant" || !asst.content.trim()) return
+      let userMsg = ""
+      for (let j = assistantIndex - 1; j >= 0; j--) {
+        if (msgs[j].role === "user") {
+          userMsg = msgs[j].content
+          break
+        }
+      }
+      setSmartApplyLoadingIdx(assistantIndex)
+      try {
+        const res = await fetch(`/api/v1/tasks/${task.id}/extract-edit-patch`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${getToken() ?? ""}`,
+          },
+          body: JSON.stringify({
+            user_message: userMsg,
+            assistant_reply: asst.content,
+            segment_type: activeSegment || undefined,
+          }),
+        })
+        const data = (await res.json().catch(() => ({}))) as {
+          detail?: string
+          old_text?: string
+          new_text?: string
+          notes?: string
+          confidence?: string
+        }
+        if (!res.ok) {
+          throw new Error(typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`)
+        }
+        const oldT = (data.old_text ?? "").trim()
+        const newT = (data.new_text ?? "").trim()
+        if (!oldT) {
+          window.alert(
+            data.notes?.trim() ||
+              "未能从正文定位到可替换片段。可改用左侧选中文字后的「润色/扩写/重写」，或缩小修改范围再试。"
+          )
+          return
+        }
+        const before = editableContent
+        if (!before.includes(oldT)) {
+          window.alert("当前编辑器正文与服务器快照不一致，请先刷新页面或保存后再试智能应用。")
+          return
+        }
+        const ok = await handleApplyToArticle(oldT, newT, "AI 改稿·智能应用")
+        if (!ok) {
+          window.alert("未能替换或保存失败：请确认正文中仍存在模型给出的原文片段。")
+        }
+      } catch (e) {
+        window.alert(e instanceof Error ? e.message : "智能应用失败")
+      } finally {
+        setSmartApplyLoadingIdx(null)
+      }
+    },
+    [chatMessages, task.id, activeSegment, editableContent, handleApplyToArticle]
+  )
 
   const handleSaveContent = useCallback(async () => {
     if (editableContent === lastSavedContentRef.current) return  // nothing changed
@@ -700,6 +845,21 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
             >
               <Bot className="h-4 w-4" />
               AI 改稿
+            </Button>
+          )}
+          {isReviewable && (
+            <Button
+              variant="outline"
+              className="gap-2"
+              disabled={articleCheckLoading}
+              onClick={() => openArticleCheck()}
+            >
+              {articleCheckLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <ListChecks className="h-4 w-4" />
+              )}
+              一键检查
             </Button>
           )}
         </div>
@@ -965,9 +1125,14 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                   <SheetTitle className="text-base font-semibold text-slate-900">AI 改稿</SheetTitle>
                   <p className="mt-1 text-[12px] font-normal leading-snug text-slate-500">
                     {activeSegment ? (
-                      <>已附带「{segmentLabels[activeSegment] ?? activeSegment}」作上下文，直接说想怎么改即可。</>
+                      <>
+                        已附带「{segmentLabels[activeSegment] ?? activeSegment}」作上下文；描述想怎么改即可。
+                        助手回复后可试「智能应用到正文」自动匹配全文替换。
+                      </>
                     ) : (
-                      <>可描述全文修改；或选中段落用浮窗「润色 / 扩写」。</>
+                      <>
+                        可描述全文或局部修改；选中段落可用浮窗「润色 / 扩写」。也可在助手回复后使用「智能应用到正文」。
+                      </>
                     )}
                   </p>
                 </div>
@@ -1079,22 +1244,35 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                                     ))}
                                 </div>
                               </div>
-                              {msg.role === "assistant" &&
-                                msg.isActionResponse &&
-                                !msg.streaming &&
-                                msg.content &&
-                                msg.selectedTextRef && (
+                              {msg.role === "assistant" && !msg.streaming && msg.content?.trim() && (
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {msg.isActionResponse && msg.selectedTextRef && (
+                                    <button
+                                      type="button"
+                                      className="inline-flex items-center gap-1.5 rounded-full border border-amber-200/90 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-950 hover:bg-amber-100/90"
+                                      onClick={() =>
+                                        void handleApplyToArticle(msg.selectedTextRef!, msg.content)
+                                      }
+                                    >
+                                      <Replace className="h-3.5 w-3.5" />
+                                      应用到文章
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
-                                    className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-amber-200/90 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-950 hover:bg-amber-100/90"
-                                    onClick={() =>
-                                      handleApplyToArticle(msg.selectedTextRef!, msg.content)
-                                    }
+                                    className="inline-flex items-center gap-1.5 rounded-full border border-violet-200/90 bg-violet-50 px-3 py-1.5 text-xs font-medium text-violet-950 hover:bg-violet-100/90 disabled:opacity-50"
+                                    disabled={smartApplyLoadingIdx !== null}
+                                    onClick={() => void trySmartApplyFromChat(i)}
                                   >
-                                    <Replace className="h-3.5 w-3.5" />
-                                    应用到文章
+                                    {smartApplyLoadingIdx === i ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Sparkles className="h-3.5 w-3.5" />
+                                    )}
+                                    智能应用到正文
                                   </button>
-                                )}
+                                </div>
+                              )}
                             </div>
                           </div>
                         )}
@@ -1427,6 +1605,46 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
       })()}
 
       {/* Approve dialog */}
+      <Dialog
+        open={articleCheckOpen}
+        onOpenChange={(open) => {
+          setArticleCheckOpen(open)
+          if (!open) {
+            setArticleCheckLoading(false)
+            setArticleCheckReport("")
+            setArticleCheckModel("")
+          }
+        }}
+      >
+        <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+          <DialogHeader className="shrink-0 border-b px-6 py-4 text-left">
+            <DialogTitle>全文审阅检查</DialogTitle>
+            <DialogDescription className="text-left text-xs text-muted-foreground">
+              {articleCheckModel
+                ? `本次调用模型：${articleCheckModel}`
+                : "对当前正文做结构化审阅（称谓、逻辑、时间线、免费/卡点、剧透、字数、重复、真实信息、分段等）。长文可能需数分钟，期间会持续推送心跳以防网关超时。"}
+            </DialogDescription>
+          </DialogHeader>
+          <ScrollArea className="min-h-[220px] max-h-[min(60vh,520px)] flex-1 px-6 py-3">
+            {articleCheckLoading ? (
+              <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
+                <Loader2 className="h-5 w-5 shrink-0 animate-spin" />
+                正在审阅全文，请稍候…
+              </div>
+            ) : (
+              <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-slate-800">
+                {articleCheckReport || "（无内容）"}
+              </pre>
+            )}
+          </ScrollArea>
+          <DialogFooter className="shrink-0 border-t px-6 py-3">
+            <Button type="button" variant="outline" onClick={() => setArticleCheckOpen(false)}>
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={showApproveDialog} onOpenChange={setShowApproveDialog}>
         <DialogContent>
           <DialogHeader>

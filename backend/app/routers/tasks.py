@@ -25,6 +25,8 @@ from app.schemas.task import (
     TaskListItem,
     TaskListResponse,
     TaskDetailResponse,
+    ExtractEditPatchRequest,
+    ExtractEditPatchResponse,
 )
 from app.utils.deps import get_current_user
 from app.utils.task_control import set_task_control, clear_task_control
@@ -365,6 +367,12 @@ async def review_chat(
                 f"---\n{excerpt}\n---"
             )
 
+    system += (
+        "\n\n【修改落稿】若用户希望把修改应用到正文："
+        "给出替换稿时尽量附带「被替换的原文连续片段」以便核对；"
+        "用户也可在助手回复后点击「智能应用到正文」，由系统根据对话在全文中匹配替换。"
+    )
+
     # Build user message
     if body.action and body.action in ACTION_PROMPTS and body.selected_text:
         user_content = ACTION_PROMPTS[body.action].format(text=body.selected_text)
@@ -416,6 +424,201 @@ async def _review_chat_generator(request: Request, db: AsyncSession, task_id: in
             )
             db.add(msg)
             await db.commit()
+
+
+_ARTICLE_CHECK_BRIEF = """你是资深网文与新媒体故事审校。请通读用户给出的【整篇文章】（虚构创作），按下列维度逐项检查，输出 Markdown 报告（## 小节 + 要点列表）。某项若无问题可写「未见明显问题」。
+
+1. 称谓、人称是否前后一致、有无明显错误
+2. 情节逻辑是否自洽，有无明显不合理之处
+3. 故事内时间安排是否合理，有无不可能发生的时间线
+4. 「免费部分」与「付费卡点/悬念」衔接是否自然；免费段是否过早泄露悬疑答案
+5. 是否有强烈暗示导致付费前剧透感
+6. 字数与节奏（是否明显偏短或拖沓；若配置有目标字数可对比）
+7. 重复句、反复表达、相似段落、无效描写、暗示性剧透情节
+8. 真实地名、精确日期（如「2025年x月x日」）、真实人名；国内过于具体的小地名（如北京某具体路名/小区名等）——列出建议删除或虚化的原文短语引用
+9. 分段是否合理；大段未分段处请指出位置并给出拆段建议（不要在此全文改写，仅审阅与建议）
+
+保持客观可执行；不对用户做道德说教；本文为用户商业创作审阅场景。"""
+
+
+@router.post("/{task_id}/article-check")
+async def article_full_check(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    model: str | None = Query(default=None, description="覆盖默认审校模型"),
+):
+    """对整篇成稿做结构化审阅。使用 SSE + 心跳，避免网关长时间无字节返回 502。"""
+    task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if current_user.role != "admin" and task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问此任务")
+    if task.status not in ("review", "approved"):
+        raise HTTPException(status_code=400, detail="只有 review/approved 状态的任务支持全文检查")
+
+    body = (task.content or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="文章内容为空")
+
+    max_chars = 120_000
+    if len(body) > max_chars:
+        body = body[:max_chars] + f"\n\n[…正文已截断至前 {max_chars} 字供审阅；全文过长时可分章检查]"
+
+    from app.services.key_pool import get_key_for_chat
+    from app.services.llm import llm_client
+    from app.config import settings
+
+    api_key = await get_key_for_chat(db, current_user.id)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="未配置可用的 API Key")
+
+    use_model = (model or "").strip() or settings.LLM_DEFAULT_MODEL
+    messages = [
+        {"role": "system", "content": _ARTICLE_CHECK_BRIEF},
+        {"role": "user", "content": f"【整篇文章如下】\n---\n{body}\n---\n请开始审阅。"},
+    ]
+
+    async def event_gen():
+        yield ": connected\n\n"
+        pending = asyncio.create_task(
+            llm_client.complete(
+                api_key=api_key,
+                messages=messages,
+                model=use_model,
+                max_tokens=16_000,
+                temperature=0.25,
+                read_timeout=900.0,
+            )
+        )
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=12.0)
+                if pending in done:
+                    break
+                yield ": keepalive\n\n"
+            result = await pending
+            payload = json.dumps(
+                {
+                    "type": "done",
+                    "report": (result.content or "").strip(),
+                    "model_used": result.model,
+                },
+                ensure_ascii=False,
+            )
+            yield f"event: done\ndata: {payload}\n\n"
+        except Exception as exc:
+            logger.exception("article-check failed task=%s", task_id)
+            err = json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False)
+            yield f"event: error\ndata: {err}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/{task_id}/extract-edit-patch", response_model=ExtractEditPatchResponse)
+async def extract_edit_patch(
+    task_id: int,
+    body: ExtractEditPatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """根据用户与助手对话，从正文中抠出可唯一替换的 old_text / new_text，供前端「智能应用」。"""
+    from app.utils.intent_detection import _extract_first_json_object, _normalize_intent_raw_response
+
+    q = select(Task).where(Task.id == task_id).options(selectinload(Task.segments))
+    task = (await db.execute(q)).scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if current_user.role != "admin" and task.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问此任务")
+    if task.status not in ("review", "approved"):
+        raise HTTPException(status_code=400, detail="只有 review/approved 状态支持此功能")
+
+    article = (task.content or "").strip()
+    if not article:
+        raise HTTPException(status_code=400, detail="文章内容为空")
+
+    seg_hint = ""
+    if body.segment_type:
+        seg = next((s for s in task.segments if s.segment_type == body.segment_type), None)
+        if seg and (seg.content or "").strip():
+            seg_hint = f"\n用户侧栏聚焦章节：{seg.title or body.segment_type}\n该章正文节选（供对齐）：\n---\n{(seg.content or '')[:12000]}\n---\n"
+
+    from app.services.key_pool import get_key_for_chat
+    from app.services.llm import llm_client
+    from app.config import settings
+
+    api_key = await get_key_for_chat(db, current_user.id)
+    if not api_key:
+        raise HTTPException(status_code=503, detail="未配置可用的 API Key")
+
+    sys = (
+        "你是精确文本编辑助手。下面是一篇完整正文，以及用户与助手的对话。"
+        "请判断助手是否给出了对正文的「具体替换」意图。"
+        "只输出一个 JSON 对象（不要 markdown 围栏），字段："
+        '`"old_text"`（必须从【完整正文】中逐字复制的连续子串，若无法唯一确定则置空字符串）、'
+        '`"new_text"`（替换后的完整连续文本；若 old_text 为空则置空）、'
+        '`"notes"`（简短中文说明）、`"confidence"`（"high"|"medium"|"low"）。'
+        "若助手仅泛泛而谈、未给出可落地替换，则 old_text 与 new_text 都为空，confidence 为 low。"
+        "\n\n【完整正文】\n---\n"
+        f"{article[:180000]}"
+        "\n---"
+        f"{seg_hint}"
+    )
+    user_blob = (
+        "【用户说明】\n"
+        + (body.user_message or "").strip()
+        + "\n\n【助手回复】\n"
+        + (body.assistant_reply or "").strip()
+    )
+    messages = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": user_blob},
+    ]
+    try:
+        result = await llm_client.complete(
+            api_key=api_key,
+            messages=messages,
+            model=settings.LLM_DEFAULT_MODEL,
+            max_tokens=8000,
+            temperature=0.1,
+        )
+    except Exception as exc:
+        logger.exception("extract-edit-patch failed task=%s", task_id)
+        raise HTTPException(status_code=502, detail=f"分析失败：{exc}") from exc
+
+    raw = _normalize_intent_raw_response(result.content)
+    blob = _extract_first_json_object(raw) or raw
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError:
+        return ExtractEditPatchResponse(
+            old_text="",
+            new_text="",
+            notes="模型未返回合法 JSON，请手动复制修改或缩小修改范围后重试。",
+            confidence="low",
+        )
+
+    old_t = str(data.get("old_text") or "").strip()
+    new_t = str(data.get("new_text") or "").strip()
+    notes = str(data.get("notes") or "").strip()
+    conf = str(data.get("confidence") or "low").strip().lower()
+    if conf not in ("high", "medium", "low"):
+        conf = "low"
+
+    if old_t and old_t not in article:
+        return ExtractEditPatchResponse(
+            old_text="",
+            new_text="",
+            notes="模型给出的 old_text 在正文中未逐字匹配，已拒绝自动替换。" + (notes and f" {notes}" or ""),
+            confidence="low",
+        )
+
+    return ExtractEditPatchResponse(old_text=old_t, new_text=new_t, notes=notes, confidence=conf)
 
 
 # ── 历史版本 ──────────────────────────────────────────────────────────────────

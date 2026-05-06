@@ -90,3 +90,21 @@ class TaskDetailResponse(BaseModel):
 class BatchCreateResponse(BaseModel):
     queued_count: int
     task_ids: list[int]
+
+
+class ArticleCheckResponse(BaseModel):
+    report: str
+    model_used: str
+
+
+class ExtractEditPatchRequest(BaseModel):
+    user_message: str
+    assistant_reply: str
+    segment_type: str | None = None
+
+
+class ExtractEditPatchResponse(BaseModel):
+    old_text: str
+    new_text: str
+    notes: str = ""
+    confidence: str = "low"

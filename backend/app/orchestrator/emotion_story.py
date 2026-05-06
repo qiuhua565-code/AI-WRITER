@@ -123,6 +123,11 @@ class EmotionStoryOrchestrator:
 
         await self._ensure_segments(task, db)
 
+        from app.utils.task_messages import is_key_queue_waiting_message
+
+        if is_key_queue_waiting_message(task.warning_msg):
+            task.warning_msg = None
+
         task.status = "writing"
         task.started_at = task.started_at or datetime.now(timezone.utc)
         await db.commit()

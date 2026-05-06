@@ -104,10 +104,16 @@ class LLMClient:
         max_tokens: int = 2000,
         temperature: float = 0.3,
         response_format: dict | None = None,
+        read_timeout: float | None = None,
     ) -> CompletionResult:
         use_model = model or settings.LLM_DEFAULT_MODEL
         system, chat_messages = _split_messages(messages)
-        client = self._client(api_key, _COMPLETE_TIMEOUT)
+        timeout = (
+            httpx.Timeout(connect=60.0, read=read_timeout, write=120.0, pool=60.0)
+            if read_timeout is not None
+            else _COMPLETE_TIMEOUT
+        )
+        client = self._client(api_key, timeout)
 
         kwargs = dict(
             model=use_model,
