@@ -453,6 +453,9 @@ export default function ChatPage() {
   const [applying, setApplying] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesScrollRef = useRef<HTMLDivElement>(null)
+  /** 仅在用户处于消息区底部附近时跟随流式输出滚动 */
+  const followStreamOutputRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sendingRef = useRef(false)
@@ -480,9 +483,26 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [])
 
+  const isMessagesNearBottom = useCallback((el: HTMLDivElement) => {
+    const { scrollTop, scrollHeight, clientHeight } = el
+    return scrollHeight - scrollTop - clientHeight < 96
+  }, [])
+
+  const onMessagesScroll = useCallback(() => {
+    const el = messagesScrollRef.current
+    if (!el) return
+    followStreamOutputRef.current = isMessagesNearBottom(el)
+  }, [isMessagesNearBottom])
+
   useEffect(() => {
+    if (!followStreamOutputRef.current) return
     scrollToBottom()
   }, [messages, scrollToBottom])
+
+  useEffect(() => {
+    if (!activeSession) return
+    followStreamOutputRef.current = true
+  }, [activeSession?.id])
 
   useEffect(() => {
     chatApi
@@ -537,6 +557,7 @@ export default function ChatPage() {
       setMessages((prev) => [...prev, userMsg, assistantMsg])
       setSending(true)
       sendingRef.current = true
+      followStreamOutputRef.current = true
 
       let streamedAssistant = ""
       let streamError: string | null = null
@@ -736,6 +757,7 @@ export default function ChatPage() {
     )
     setSending(true)
     sendingRef.current = true
+    followStreamOutputRef.current = true
 
     let streamedAssistant = ""
     let streamError: string | null = null
@@ -1098,7 +1120,11 @@ export default function ChatPage() {
         </div>
 
         {/* 消息区 */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-32 pt-4 md:px-10">
+        <div
+          ref={messagesScrollRef}
+          onScroll={onMessagesScroll}
+          className="min-h-0 flex-1 overflow-y-auto px-4 pb-32 pt-4 md:px-10"
+        >
           {!activeSession ? (
             <div className="flex min-h-[48vh] flex-col items-center justify-center gap-6 px-2 text-center">
               <p className="font-serif text-3xl font-normal tracking-tight text-slate-800 md:text-4xl">

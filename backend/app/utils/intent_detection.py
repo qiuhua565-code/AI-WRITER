@@ -105,7 +105,22 @@ async def detect_user_intent_with_llm(
             response_text = response_text[:-3]
         response_text = response_text.strip()
 
-        result = json.loads(response_text)
+        if not response_text:
+            logger.warning(
+                "Intent LLM returned empty body (upstream may have filtered or failed); using default intent"
+            )
+            raise ValueError("empty intent response")
+
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError as je:
+            snippet = response_text[:200].replace("\n", " ")
+            logger.warning(
+                "Intent LLM returned non-JSON (parse at char %s); snippet=%r; using default intent",
+                getattr(je, "pos", None),
+                snippet,
+            )
+            raise
 
         intent = UserIntent(
             word_count_requirement=result.get("word_count_requirement"),
@@ -131,7 +146,7 @@ async def detect_user_intent_with_llm(
         return intent
 
     except Exception as e:
-        logger.error("Failed to detect user intent with LLM: %s", e)
+        logger.warning("Intent detection fallback (LLM unavailable or bad output): %s", e)
         # 降级：返回默认意图
         return UserIntent(
             word_count_requirement=None,

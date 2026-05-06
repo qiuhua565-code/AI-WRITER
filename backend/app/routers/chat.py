@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -667,6 +668,66 @@ def _chat_stream_should_continue(stop_reason: str | None) -> bool:
     return r in ("max_tokens", "length")
 
 
+async def _merge_llm_stream_with_heartbeats(
+    request: Request,
+    llm_chunks: AsyncIterator,
+    heartbeat_interval: float,
+):
+    """
+    在 upstream 长时间不返回 token 时仍向客户端写入 SSE 注释行，
+    避免反向代理 / 负载均衡因读超时关闭连接（浏览器表现为 network error）。
+    以 None 表示一次心跳，由调用方 yield ``: heartbeat``。
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    stop = asyncio.Event()
+
+    async def pump() -> None:
+        try:
+            async for chunk in llm_chunks:
+                await queue.put(("c", chunk))
+        except BaseException as exc:
+            await queue.put(("x", exc))
+        finally:
+            stop.set()
+            await queue.put(("d", None))
+
+    async def heartbeat() -> None:
+        try:
+            while True:
+                await asyncio.sleep(heartbeat_interval)
+                if stop.is_set():
+                    return
+                await queue.put(("h", None))
+        except asyncio.CancelledError:
+            return
+
+    pump_task = asyncio.create_task(pump())
+    hb_task = asyncio.create_task(heartbeat())
+    try:
+        while True:
+            kind, data = await queue.get()
+            if kind == "d":
+                break
+            if kind == "x":
+                raise data
+            if kind == "h":
+                yield None
+            elif kind == "c":
+                yield data
+    finally:
+        stop.set()
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
+        pump_task.cancel()
+        try:
+            await pump_task
+        except BaseException:
+            pass
+
+
 async def _chat_generator(request: Request, db: AsyncSession, session_id: int, session: ChatSession, api_key: str, messages: list, model: str, editor_content: str = ""):
     """
     流式生成助手回复；支持智能字数控制：
@@ -691,10 +752,9 @@ async def _chat_generator(request: Request, db: AsyncSession, session_id: int, s
     last_heartbeat = time.time()
     heartbeat_interval = 15  # 每 15 秒发送一次心跳
 
-    # 使用 LLM 识别用户意图
+    # 从末条用户消息提取纯文本（用于意图识别与偷懒检测）
     user_intent: UserIntent | None = None
     user_request = ""
-    # editor_content 已经从外层传入，不需要再从 body 提取
 
     if messages:
         last_user_msg = None
@@ -713,71 +773,83 @@ async def _chat_generator(request: Request, db: AsyncSession, session_id: int, s
                         user_request = block.get("text", "")
                         break
 
-            # 使用 LLM 识别意图
-            if user_request:
-                try:
-                    user_intent = await detect_user_intent_with_llm(
-                        user_message=user_request,
-                        llm_client=llm_client,
-                        api_key=api_key,
-                    )
-                except Exception as e:
-                    logger.error("Failed to detect user intent: %s", e)
-                    # 降级：使用默认意图
-                    user_intent = UserIntent(
-                        word_count_requirement=None,
-                        is_full_output=False,
-                        is_continue_request=False,
-                        is_check_request=False,
-                        action="generate",
-                        summary="生成内容",
-                        target_section=None
-                    )
-
-    if user_intent:
-        logger.info(
-            "Detected user intent: word_count=%s, full_output=%s, continue=%s, check=%s, action=%s, target=%s, summary=%s (session=%s)",
-            user_intent.word_count_requirement,
-            user_intent.is_full_output,
-            user_intent.is_continue_request,
-            user_intent.is_check_request,
-            user_intent.action,
-            user_intent.target_section,
-            user_intent.summary,
-            session_id,
-        )
-
-    # 如果是检查请求，需要获取文章内容
-    article_to_check = ""
-    if user_intent and user_intent.is_check_request:
-        # 优先使用编辑器内容
-        if editor_content:
-            article_to_check = editor_content
-        else:
-            # 从对话历史中查找最近的助手回复（文章内容）
-            for msg in reversed(messages):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    if isinstance(content, str) and len(content) > 100:
-                        article_to_check = content
-                        break
-
-        if not article_to_check:
-            logger.warning("Check request but no article content found for session=%s", session_id)
-            # 可以提示用户需要提供文章内容
-        else:
-            logger.info(
-                "Check request: article length=%s words for session=%s",
-                count_words(article_to_check),
-                session_id,
-            )
-
     # 重试机制：如果检测到 AI 偷懒，最多重试 1 次
     max_retries = 1
     retry_count = 0
 
     try:
         yield ": connected\n\n"
+
+        article_to_check = ""
+        if user_request:
+            intent_task = asyncio.create_task(
+                detect_user_intent_with_llm(
+                    user_message=user_request,
+                    llm_client=llm_client,
+                    api_key=api_key,
+                )
+            )
+            while not intent_task.done():
+                done, _ = await asyncio.wait({intent_task}, timeout=heartbeat_interval)
+                if intent_task in done:
+                    break
+                if await request.is_disconnected():
+                    intent_task.cancel()
+                    try:
+                        await intent_task
+                    except asyncio.CancelledError:
+                        pass
+                    return
+                yield ": heartbeat\n\n"
+                last_heartbeat = time.time()
+            try:
+                user_intent = intent_task.result()
+            except Exception as e:
+                logger.error("Failed to detect user intent: %s", e)
+                user_intent = UserIntent(
+                    word_count_requirement=None,
+                    is_full_output=False,
+                    is_continue_request=False,
+                    is_check_request=False,
+                    action="generate",
+                    summary="生成内容",
+                    target_section=None,
+                )
+
+        if user_intent:
+            logger.info(
+                "Detected user intent: word_count=%s, full_output=%s, continue=%s, check=%s, action=%s, target=%s, summary=%s (session=%s)",
+                user_intent.word_count_requirement,
+                user_intent.is_full_output,
+                user_intent.is_continue_request,
+                user_intent.is_check_request,
+                user_intent.action,
+                user_intent.target_section,
+                user_intent.summary,
+                session_id,
+            )
+
+        if user_intent and user_intent.is_check_request:
+            # 优先使用编辑器内容
+            if editor_content:
+                article_to_check = editor_content
+            else:
+                # 从对话历史中查找最近的助手回复（文章内容）
+                for msg in reversed(messages):
+                    if msg.get("role") == "assistant":
+                        content = msg.get("content", "")
+                        if isinstance(content, str) and len(content) > 100:
+                            article_to_check = content
+                            break
+
+            if not article_to_check:
+                logger.warning("Check request but no article content found for session=%s", session_id)
+            else:
+                logger.info(
+                    "Check request: article length=%s words for session=%s",
+                    count_words(article_to_check),
+                    session_id,
+                )
 
         while retry_count <= max_retries:
             # 重置累积内容（重试时）
@@ -840,29 +912,33 @@ async def _chat_generator(request: Request, db: AsyncSession, session_id: int, s
                 round_finish: str | None = None
                 round_parts: list[str] = []
 
-                async for chunk in llm_client.stream(
-                    api_key=api_key,
-                    messages=msgs,
-                    model=model,
-                    max_tokens=settings.LLM_CHAT_MAX_OUTPUT_TOKENS,
-                    temperature=0.7,
+                async for item in _merge_llm_stream_with_heartbeats(
+                    request,
+                    llm_client.stream(
+                        api_key=api_key,
+                        messages=msgs,
+                        model=model,
+                        max_tokens=settings.LLM_CHAT_MAX_OUTPUT_TOKENS,
+                        temperature=0.7,
+                    ),
+                    heartbeat_interval,
                 ):
                     if await request.is_disconnected():
                         stop_stream = True
                         break
 
-                    # 心跳检测：如果超过 heartbeat_interval 秒没有发送数据，发送心跳注释
-                    current_time = time.time()
-                    if current_time - last_heartbeat > heartbeat_interval:
+                    if item is None:
                         yield ": heartbeat\n\n"
-                        last_heartbeat = current_time
+                        last_heartbeat = time.time()
+                        continue
 
+                    chunk = item
                     if chunk.content:
                         round_parts.append(chunk.content)
                         full_response.append(chunk.content)
                         payload = json.dumps({"type": "token", "content": chunk.content}, ensure_ascii=False)
                         yield f"event: token\ndata: {payload}\n\n"
-                        last_heartbeat = current_time  # 发送数据后重置心跳计时
+                        last_heartbeat = time.time()
                     if chunk.finish_reason:
                         round_finish = chunk.finish_reason
                         if chunk.usage_input_tokens is not None:
