@@ -672,6 +672,8 @@ async def _merge_llm_stream_with_heartbeats(
     request: Request,
     llm_chunks: AsyncIterator,
     heartbeat_interval: float,
+    *,
+    log_session_id: int | None = None,
 ):
     """
     在 upstream 长时间不返回 token 时仍向客户端写入 SSE 注释行，
@@ -709,6 +711,18 @@ async def _merge_llm_stream_with_heartbeats(
             if kind == "d":
                 break
             if kind == "x":
+                if isinstance(data, BaseException):
+                    logger.error(
+                        "chat llm upstream stream failed session=%s",
+                        log_session_id,
+                        exc_info=data,
+                    )
+                else:
+                    logger.error(
+                        "chat llm upstream stream failed session=%s err=%r",
+                        log_session_id,
+                        data,
+                    )
                 raise data
             if kind == "h":
                 yield None
@@ -776,6 +790,8 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
     6. 支持文章检查功能
     """
     full_response: list[str] = []
+    stream_token_events = 0
+    stream_chars = 0
     tokens_in: int | None = None
     tokens_out: int | None = None
     used_model = model
@@ -899,6 +915,8 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
             if retry_count > 0:
                 accumulated = ""
                 full_response = []
+                stream_token_events = 0
+                stream_chars = 0
 
                 # 发送重试警告到前端
                 warning_payload = json.dumps({
@@ -965,9 +983,17 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                         temperature=0.7,
                     ),
                     heartbeat_interval,
+                    log_session_id=session_id,
                 ):
                     if await request.is_disconnected():
                         stop_stream = True
+                        logger.warning(
+                            "chat stream client disconnect session=%s seg=%s chunks=%s chars=%s",
+                            session_id,
+                            seg_idx,
+                            stream_token_events,
+                            stream_chars,
+                        )
                         break
 
                     if item is None:
@@ -979,6 +1005,16 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                     if chunk.content:
                         round_parts.append(chunk.content)
                         full_response.append(chunk.content)
+                        stream_token_events += 1
+                        stream_chars += len(chunk.content)
+                        if stream_token_events % 250 == 0:
+                            logger.info(
+                                "chat stream progress session=%s seg=%s chunks=%s chars=%s",
+                                session_id,
+                                seg_idx,
+                                stream_token_events,
+                                stream_chars,
+                            )
                         payload = json.dumps({"type": "token", "content": chunk.content}, ensure_ascii=False)
                         yield f"event: token\ndata: {payload}\n\n"
                         last_heartbeat = time.time()
@@ -1040,13 +1076,35 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
             payload = json.dumps(done_payload, ensure_ascii=False)
             yield f"event: done\ndata: {payload}\n\n"
 
+    except asyncio.CancelledError:
+        logger.warning(
+            "chat stream cancelled session=%s chunks=%s accum_len=%s full_parts=%s",
+            session_id,
+            stream_token_events,
+            len(accumulated),
+            len(full_response),
+        )
+        raise
     except Exception as exc:
         logger.exception("Chat stream error for session %s", session_id)
         payload = json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False)
         yield f"event: error\ndata: {payload}\n\n"
     finally:
-        if full_response:
-            content = "".join(full_response)
+        # 与 accumulated 对齐：异常或中途断开时可能未执行 accumulated +=，但仍需落库已产出的片段，
+        # 否则用户切走再回来 getMessages 只有用户消息、助手行缺失。
+        content = "".join(full_response)
+        if not content and accumulated:
+            content = accumulated
+        logger.info(
+            "chat stream finally session=%s stop_stream=%s chunks=%s stream_chars=%s accum_len=%s persist_len=%s",
+            session_id,
+            stop_stream,
+            stream_token_events,
+            stream_chars,
+            len(accumulated),
+            len(content),
+        )
+        if content:
             try:
                 await _persist_assistant_message(
                     session_id,

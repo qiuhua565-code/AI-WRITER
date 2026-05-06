@@ -18,13 +18,20 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   if (lastEventId) headers.set('last-event-id', lastEventId)
 
   const pathStr = path.join('/')
-  const isSseGet = req.method === 'GET' && pathStr.endsWith('/stream')
-  if (isSseGet) {
+  // 任务写作等用 GET /stream；对话用 POST /chat/sessions/:id/stream。二者都需禁用压缩、禁用缓存，
+  // 否则 Edge 向上游 fetch 可能走 gzip + chunked，长 SSE 易出现 net::ERR_INCOMPLETE_CHUNKED_ENCODING。
+  const isSseStream =
+    pathStr.endsWith('/stream') && (req.method === 'GET' || req.method === 'POST')
+  if (isSseStream) {
     headers.set('cache-control', 'no-store')
     headers.set('accept-encoding', 'identity')
   }
 
-  const init: RequestInit = { method: req.method, headers, cache: isSseGet ? 'no-store' : undefined }
+  const init: RequestInit = {
+    method: req.method,
+    headers,
+    cache: isSseStream ? 'no-store' : undefined,
+  }
   if (!['GET', 'HEAD'].includes(req.method)) {
     init.body = await req.arrayBuffer()
   }
@@ -38,7 +45,7 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     resHeaders.set(k, v)
   })
 
-  if (isSseGet) {
+  if (isSseStream) {
     resHeaders.set('Cache-Control', 'no-store')
     resHeaders.set('X-Accel-Buffering', 'no')
   }

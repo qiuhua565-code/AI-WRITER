@@ -296,44 +296,55 @@ async function consumeChatSSE(
 ): Promise<string> {
   if (!res.ok || !res.body) {
     const t = await res.text().catch(() => "")
-    throw new Error(t || `HTTP ${res.status}`)
+    throw Object.assign(new Error(t || `HTTP ${res.status}`), {
+      partialAssistantText: "",
+    })
   }
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
   let accumulated = ""
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split("\n")
-    buffer = lines.pop() ?? ""
-    for (const line of lines) {
-      if (!line.startsWith("data:")) continue
-      const raw = line.slice(5).trim()
-      if (!raw) continue
-      try {
-        const event = JSON.parse(raw) as {
-          type?: string
-          content?: string
-          error?: string
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split("\n")
+      buffer = lines.pop() ?? ""
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue
+        const raw = line.slice(5).trim()
+        if (!raw) continue
+        try {
+          const event = JSON.parse(raw) as {
+            type?: string
+            content?: string
+            error?: string
+          }
+          if (event.type === "error") {
+            throw Object.assign(new Error(event.error || "流式输出失败"), {
+              partialAssistantText: accumulated,
+            })
+          }
+          if (event.type === "token" && event.content) {
+            accumulated += event.content
+            onAccumulated(accumulated)
+          }
+        } catch (e) {
+          if (e instanceof SyntaxError) continue
+          throw e
         }
-        if (event.type === "error") {
-          throw Object.assign(new Error(event.error || "流式输出失败"), {
-            partialAssistantText: accumulated,
-          })
-        }
-        if (event.type === "token" && event.content) {
-          accumulated += event.content
-          onAccumulated(accumulated)
-        }
-      } catch (e) {
-        if (e instanceof SyntaxError) continue
-        throw e
       }
     }
+    return accumulated
+  } catch (e: unknown) {
+    if (e && typeof e === "object" && "partialAssistantText" in e) {
+      throw e
+    }
+    throw Object.assign(e instanceof Error ? e : new Error(String(e)), {
+      partialAssistantText: accumulated,
+    })
   }
-  return accumulated
 }
 
 function StreamingDots() {
@@ -623,6 +634,17 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sendingRef = useRef(false)
+  /** 流式结束时若用户已切到其它会话，在此暂存 reconcile 参数，切回本会话时与 getMessages 结果合并 */
+  const pendingChatReconcileRef = useRef<
+    Map<
+      number,
+      {
+        streamedAssistant: string
+        optimisticAssistantId: number
+        streamError: string | null
+      }
+    >
+  >(new Map())
 
   const displayName = useMemo(() => {
     if (!user?.email) return "用户"
@@ -699,7 +721,20 @@ export default function ChatPage() {
       .getMessages(sid)
       .then((rows) => {
         if (activeSessionRef.current?.id !== sid) return
-        setMessages(rows)
+        const pending = pendingChatReconcileRef.current.get(sid)
+        if (pending) {
+          setMessages(
+            reconcileChatMessages(
+              rows,
+              pending.streamedAssistant,
+              pending.optimisticAssistantId,
+              pending.streamError
+            )
+          )
+          pendingChatReconcileRef.current.delete(sid)
+        } else {
+          setMessages(rows)
+        }
       })
       .catch(console.error)
   }, [activeSession])
@@ -734,6 +769,7 @@ export default function ChatPage() {
         created_at: new Date().toISOString(),
         streaming: true,
       }
+      pendingChatReconcileRef.current.delete(session.id)
       setMessages((prev) => {
         if (activeSessionRef.current?.id !== session.id) return prev
         return [...prev, userMsg, assistantMsg]
@@ -764,21 +800,31 @@ export default function ChatPage() {
         const partial = streamErrorPartial(e)
         if (partial) streamedAssistant = partial
       } finally {
+        const sid = session.id
         chatApi
-          .getMessages(session.id)
+          .getMessages(sid)
           .then((serverMsgs) => {
-            if (activeSessionRef.current?.id !== session.id) return
-            setMessages(
-              reconcileChatMessages(
-                serverMsgs,
-                streamedAssistant,
-                assistantMsg.id,
-                streamError
+            const act = activeSessionRef.current
+            if (act?.id === sid) {
+              pendingChatReconcileRef.current.delete(sid)
+              setMessages(
+                reconcileChatMessages(
+                  serverMsgs,
+                  streamedAssistant,
+                  assistantMsg.id,
+                  streamError
+                )
               )
-            )
+            } else if (streamError || streamedAssistant.trim()) {
+              pendingChatReconcileRef.current.set(sid, {
+                streamedAssistant,
+                optimisticAssistantId: assistantMsg.id,
+                streamError,
+              })
+            }
           })
           .catch(() => {
-            if (activeSessionRef.current?.id !== session.id) return
+            if (activeSessionRef.current?.id !== sid) return
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantMsg.id ? { ...m, streaming: false } : m
@@ -961,6 +1007,7 @@ export default function ChatPage() {
     setSending(true)
     sendingRef.current = true
     followStreamOutputRef.current = true
+    pendingChatReconcileRef.current.delete(regenSessionId)
 
     let streamedAssistant = ""
     let streamError: string | null = null
@@ -989,15 +1036,24 @@ export default function ChatPage() {
       chatApi
         .getMessages(regenSessionId)
         .then((serverMsgs) => {
-          if (activeSessionRef.current?.id !== regenSessionId) return
-          setMessages(
-            reconcileChatMessages(
-              serverMsgs,
-              streamedAssistant,
-              assistantMsgId,
-              streamError
+          const act = activeSessionRef.current
+          if (act?.id === regenSessionId) {
+            pendingChatReconcileRef.current.delete(regenSessionId)
+            setMessages(
+              reconcileChatMessages(
+                serverMsgs,
+                streamedAssistant,
+                assistantMsgId,
+                streamError
+              )
             )
-          )
+          } else if (streamError || streamedAssistant.trim()) {
+            pendingChatReconcileRef.current.set(regenSessionId, {
+              streamedAssistant,
+              optimisticAssistantId: assistantMsgId,
+              streamError,
+            })
+          }
         })
         .catch(console.error)
     }
