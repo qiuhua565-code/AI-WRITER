@@ -1,6 +1,7 @@
 """使用 LLM 识别用户意图"""
 import json
 import logging
+import re
 from typing import Optional
 from dataclasses import dataclass
 
@@ -425,6 +426,25 @@ def generate_check_prompt(article_content: str) -> str:
 """
 
 
+def _looks_like_article_closure(accumulated_text: str) -> bool:
+    """
+    正文已出现明显收束标记时，不再为凑字数在文末续写（避免「全文完」后又接一段）。
+    """
+    t = (accumulated_text or "").strip()
+    if not t:
+        return False
+    tail = t[-2200:]
+    if "全文完" in tail:
+        return True
+    if re.search(r"（\s*完\s*）", tail) or re.search(r"\(\s*完\s*\)", tail):
+        return True
+    if re.search(r"</\s*document\s*>\s*$", t, re.I):
+        return True
+    if "全文结束" in tail or "完稿" in tail:
+        return True
+    return False
+
+
 def should_continue_for_word_count(
     accumulated_text: str,
     required_words: Optional[int],
@@ -454,6 +474,12 @@ def should_continue_for_word_count(
     # 达到最大段数限制
     if segment_index >= max_segments - 1:
         return False, f"max segments reached ({current_words}/{required_words} words)"
+
+    # 已出现收束语：宁可略少于目标字数，也不要在「全文完」后硬续
+    if _looks_like_article_closure(accumulated_text):
+        return False, (
+            f"article closure detected, stop continue ({current_words}/{required_words} words)"
+        )
 
     # 字数不足，需要续写
     shortage = required_words - current_words

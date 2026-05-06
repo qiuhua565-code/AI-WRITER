@@ -755,6 +755,14 @@ async def _persist_assistant_message(
         db.add(assistant_msg)
         session.updated_at = datetime.now(timezone.utc)
         await db.commit()
+        logger.info(
+            "chat persist ok session=%s model=%s content_len=%s tokens_in=%s tokens_out=%s",
+            session_id,
+            used_model,
+            len(content),
+            tokens_in,
+            tokens_out,
+        )
 
 
 async def _chat_generator(request: Request, session_id: int, api_key: str, messages: list, model: str, editor_content: str = ""):
@@ -808,6 +816,12 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
 
     try:
         yield ": connected\n\n"
+        logger.info(
+            "chat stream connected session=%s model=%s history_msgs=%s",
+            session_id,
+            model,
+            len(messages),
+        )
 
         article_to_check = ""
         if user_request:

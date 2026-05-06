@@ -200,6 +200,22 @@ def generate_full_output_prompt(
     return prompt
 
 
+def _looks_like_article_closure(accumulated_text: str) -> bool:
+    t = (accumulated_text or "").strip()
+    if not t:
+        return False
+    tail = t[-2200:]
+    if "全文完" in tail:
+        return True
+    if re.search(r"（\s*完\s*）", tail) or re.search(r"\(\s*完\s*\)", tail):
+        return True
+    if re.search(r"</\s*document\s*>\s*$", t, re.I):
+        return True
+    if "全文结束" in tail or "完稿" in tail:
+        return True
+    return False
+
+
 def should_continue_for_word_count(
     accumulated_text: str,
     required_words: Optional[int],
@@ -234,6 +250,11 @@ def should_continue_for_word_count(
     # 达到最大段数限制
     if segment_index >= max_segments - 1:
         return False, f"max segments reached ({current_words}/{required_words} words)"
+
+    if _looks_like_article_closure(accumulated_text):
+        return False, (
+            f"article closure detected, stop continue ({current_words}/{required_words} words)"
+        )
 
     # 字数不足，需要续写
     shortage = required_words - current_words

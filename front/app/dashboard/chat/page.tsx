@@ -361,6 +361,28 @@ function stripDocumentWrapperTags(s: string): string {
   return s.replace(/<\s*\/?\s*document\s*>/gi, "")
 }
 
+/** 去掉 <thinking>…</thinking> 等（含大小写），避免整段英文思考污染正文 */
+function stripThinkingBlocks(s: string): string {
+  return s
+    .replace(/<\s*thinking[\s\S]*?<\/\s*thinking\s*>/gi, "")
+    .replace(/<\s*thought[\s\S]*?<\/\s*thought\s*>/gi, "")
+    .replace(/<\s*redacted_thinking[\s\S]*?<\/\s*redacted_thinking\s*>/gi, "")
+    .replace(/<\s*think\s*>[\s\S]*?<\/\s*think\s*>/gi, "")
+}
+
+/** 展示用：去掉 document、thinking，并去掉流式末尾未闭合的 <thinking 片段 */
+function sanitizeAssistantDisplay(raw: string, streaming?: boolean): string {
+  let t = stripDocumentWrapperTags(raw)
+  t = stripThinkingBlocks(t)
+  if (streaming) {
+    const idx = t.search(/<\s*thinking\b/i)
+    if (idx !== -1 && !/<\/\s*thinking\s*>/i.test(t.slice(idx))) {
+      t = t.slice(0, idx)
+    }
+  }
+  return t
+}
+
 type ChatSegment = { kind: "body" | "think"; body: string; tag?: string }
 
 /** 将正文与 <thinking> / <thought> 等块拆开，思考块单独用折叠 UI 展示 */
@@ -396,26 +418,30 @@ function splitAssistantSegments(raw: string): ChatSegment[] {
   return segments.length ? segments : [{ kind: "body", body: str }]
 }
 
-/** 复制用：优先只要正文段落；若只有思考块则回退为去掉 document 标签后的全文 */
+/** 复制用：优先只要正文段落；若只有思考块则回退为去掉标签后的全文 */
 function assistantPlainTextForCopy(raw: string): string {
-  const bodyOnly = splitAssistantSegments(raw)
+  const cleaned = sanitizeAssistantDisplay(raw, false)
+  const bodyOnly = splitAssistantSegments(cleaned)
     .filter((s) => s.kind === "body")
     .map((s) => s.body)
     .join("\n\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
   if (bodyOnly) return bodyOnly
-  return stripDocumentWrapperTags(raw).trim()
+  return sanitizeAssistantDisplay(raw, false).trim()
 }
 
 async function copyTextToClipboard(text: string): Promise<void> {
   const t = text ?? ""
   if (!t) return
-  try {
-    await navigator.clipboard.writeText(t)
-    return
-  } catch {
-    /* 非 HTTPS / 无权限时走降级 */
+  const clip = typeof navigator !== "undefined" ? navigator.clipboard : undefined
+  if (clip && typeof clip.writeText === "function") {
+    try {
+      await clip.writeText(t)
+      return
+    } catch {
+      /* 无权限等：走降级 */
+    }
   }
   const ta = document.createElement("textarea")
   ta.value = t
@@ -475,7 +501,11 @@ function MessageContent({
   content: string
   streaming?: boolean
 }) {
-  const segments = useMemo(() => splitAssistantSegments(content), [content])
+  const displaySource = useMemo(
+    () => sanitizeAssistantDisplay(content, streaming),
+    [content, streaming]
+  )
+  const segments = useMemo(() => splitAssistantSegments(displaySource), [displaySource])
   const thinkTitle = (tag?: string) => {
     if (tag === "redacted_thinking") return "思考过程（已脱敏）"
     if (tag === "reasoning" || tag === "analysis") return "推理与分析"
@@ -704,9 +734,10 @@ export default function ChatPage() {
         created_at: new Date().toISOString(),
         streaming: true,
       }
-      setMessages((prev) => [...prev, userMsg, assistantMsg])
-      setSending(true)
-      sendingRef.current = true
+      setMessages((prev) => {
+        if (activeSessionRef.current?.id !== session.id) return prev
+        return [...prev, userMsg, assistantMsg]
+      })
       followStreamOutputRef.current = true
 
       let streamedAssistant = ""
@@ -733,8 +764,6 @@ export default function ChatPage() {
         const partial = streamErrorPartial(e)
         if (partial) streamedAssistant = partial
       } finally {
-        sendingRef.current = false
-        setSending(false)
         chatApi
           .getMessages(session.id)
           .then((serverMsgs) => {
@@ -809,6 +838,7 @@ export default function ChatPage() {
       const session = await chatApi.createSession("新对话")
       setSessions((prev) => [session, ...prev])
       setActiveSession(session)
+      activeSessionRef.current = session
       setMobileNavOpen(false)
     } catch (e) {
       console.error(e)
@@ -823,7 +853,10 @@ export default function ChatPage() {
     try {
       await chatApi.deleteSession(session.id)
       setSessions((prev) => prev.filter((s) => s.id !== session.id))
-      if (activeSession?.id === session.id) setActiveSession(null)
+      if (activeSession?.id === session.id) {
+        setActiveSession(null)
+        activeSessionRef.current = null
+      }
     } catch (e) {
       console.error(e)
     }
@@ -868,7 +901,10 @@ export default function ChatPage() {
     const text = input.trim()
     const attachments =
       pendingAttachments.length > 0 ? [...pendingAttachments] : undefined
-    if ((!text && !attachments) || sending) return
+    if ((!text && !attachments) || sending || sendingRef.current) return
+
+    sendingRef.current = true
+    setSending(true)
 
     setInput("")
     setPendingAttachments([])
@@ -878,12 +914,13 @@ export default function ChatPage() {
 
     if (!session) {
       try {
-        sendingRef.current = true
         session = await chatApi.createSession(titleHint.slice(0, 24))
         setSessions((prev) => [session!, ...prev])
         setActiveSession(session)
+        activeSessionRef.current = session
       } catch (e) {
         sendingRef.current = false
+        setSending(false)
         console.error(e)
         return
       }
@@ -895,7 +932,18 @@ export default function ChatPage() {
       )
     }
 
-    await streamToSession(session, text, selectedModel, attachments, linkedTask ? { type: 'editor_content', content: linkedTask.content } : undefined)
+    try {
+      await streamToSession(
+        session,
+        text,
+        selectedModel,
+        attachments,
+        linkedTask ? { type: "editor_content", content: linkedTask.content } : undefined
+      )
+    } finally {
+      sendingRef.current = false
+      setSending(false)
+    }
   }
 
   const handleRegenerate = async (assistantMsgId: number) => {
@@ -1073,12 +1121,14 @@ export default function ChatPage() {
                 tabIndex={0}
                 onClick={() => {
                   setActiveSession(session)
+                  activeSessionRef.current = session
                   setMobileNavOpen(false)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault()
                     setActiveSession(session)
+                    activeSessionRef.current = session
                     setMobileNavOpen(false)
                   }
                 }}
@@ -1195,28 +1245,35 @@ export default function ChatPage() {
                   size="sm"
                   className="gap-1.5 text-xs border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
                   onClick={async () => {
+                    if (sending || sendingRef.current) return
                     const text = "请帮我全面检查这篇文章"
                     setInput("")
-                    let session = activeSession
-                    if (!session) {
-                      try {
-                        sendingRef.current = true
-                        session = await chatApi.createSession(text.slice(0, 24))
-                        setSessions((prev) => [session!, ...prev])
-                        setActiveSession(session)
-                      } catch (e) {
-                        sendingRef.current = false
-                        console.error(e)
-                        return
+                    sendingRef.current = true
+                    setSending(true)
+                    try {
+                      let session = activeSession
+                      if (!session) {
+                        try {
+                          session = await chatApi.createSession(text.slice(0, 24))
+                          setSessions((prev) => [session!, ...prev])
+                          setActiveSession(session)
+                          activeSessionRef.current = session
+                        } catch (e) {
+                          console.error(e)
+                          return
+                        }
                       }
+                      await streamToSession(
+                        session,
+                        text,
+                        selectedModel,
+                        undefined,
+                        { type: 'editor_content', content: linkedTask.content }
+                      )
+                    } finally {
+                      sendingRef.current = false
+                      setSending(false)
                     }
-                    await streamToSession(
-                      session,
-                      text,
-                      selectedModel,
-                      undefined,
-                      { type: 'editor_content', content: linkedTask.content }
-                    )
                   }}
                   disabled={sending}
                   type="button"
