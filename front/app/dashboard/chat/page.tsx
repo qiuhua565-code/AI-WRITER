@@ -1,6 +1,14 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react"
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  type ReactNode,
+  type HTMLAttributes,
+} from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { diffWords } from "diff"
@@ -348,6 +356,118 @@ function StreamingDots() {
   )
 }
 
+/** 去掉模型偶发输出的 document 包裹标签（不参与正文） */
+function stripDocumentWrapperTags(s: string): string {
+  return s.replace(/<\s*\/?\s*document\s*>/gi, "")
+}
+
+type ChatSegment = { kind: "body" | "think"; body: string; tag?: string }
+
+/** 将正文与 <thinking> / <thought> 等块拆开，思考块单独用折叠 UI 展示 */
+function splitAssistantSegments(raw: string): ChatSegment[] {
+  const str = stripDocumentWrapperTags(raw)
+  const segments: ChatSegment[] = []
+  let i = 0
+  let guard = 0
+  while (i < str.length && guard++ < 500) {
+    const slice = str.slice(i)
+    const open = slice.match(
+      /^([\s\S]*?)<(thinking|thought|think|reasoning|analysis|redacted_thinking)(?:\s[^>]*)?>/i
+    )
+    if (!open) {
+      const tail = str.slice(i)
+      if (tail) segments.push({ kind: "body", body: tail })
+      break
+    }
+    if (open[1]) segments.push({ kind: "body", body: open[1] })
+    const tag = open[2].toLowerCase()
+    const afterOpen = i + open[0].length
+    const closeRe = new RegExp(`</\\s*${tag}\\s*>`, "i")
+    const tailFromOpen = str.slice(afterOpen)
+    const closeMatch = tailFromOpen.match(closeRe)
+    if (!closeMatch || closeMatch.index === undefined) {
+      segments.push({ kind: "body", body: str.slice(i) })
+      break
+    }
+    const inner = tailFromOpen.slice(0, closeMatch.index).trim()
+    segments.push({ kind: "think", body: inner, tag })
+    i = afterOpen + closeMatch.index + closeMatch[0].length
+  }
+  return segments.length ? segments : [{ kind: "body", body: str }]
+}
+
+/** 复制用：优先只要正文段落；若只有思考块则回退为去掉 document 标签后的全文 */
+function assistantPlainTextForCopy(raw: string): string {
+  const bodyOnly = splitAssistantSegments(raw)
+    .filter((s) => s.kind === "body")
+    .map((s) => s.body)
+    .join("\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+  if (bodyOnly) return bodyOnly
+  return stripDocumentWrapperTags(raw).trim()
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  const t = text ?? ""
+  if (!t) return
+  try {
+    await navigator.clipboard.writeText(t)
+    return
+  } catch {
+    /* 非 HTTPS / 无权限时走降级 */
+  }
+  const ta = document.createElement("textarea")
+  ta.value = t
+  ta.setAttribute("readonly", "")
+  ta.style.position = "fixed"
+  ta.style.left = "-9999px"
+  ta.style.top = "0"
+  document.body.appendChild(ta)
+  try {
+    ta.focus()
+    ta.select()
+    const ok = document.execCommand("copy")
+    if (!ok) throw new Error("execCommand copy returned false")
+  } finally {
+    ta.remove()
+  }
+}
+
+const chatMarkdownComponents = {
+  pre({ children }: { children?: ReactNode }) {
+    return <>{children}</>
+  },
+  code({
+    className,
+    children,
+    ...props
+  }: {
+    className?: string
+    children?: ReactNode
+  } & HTMLAttributes<HTMLElement>) {
+    const match = /language-(\w+)/.exec(className || "")
+    const isBlock = !!match
+    if (isBlock) {
+      return (
+        <SyntaxHighlighter
+          style={oneDark as Record<string, React.CSSProperties>}
+          language={match[1]}
+          PreTag="div"
+          className="!rounded-xl !text-[13px] !my-3 !shadow-sm"
+        >
+          {String(children).replace(/\n$/, "")}
+        </SyntaxHighlighter>
+      )
+    }
+    return (
+      <code className={className} {...props}>
+        {children}
+      </code>
+    )
+  },
+}
+
 function MessageContent({
   content,
   streaming,
@@ -355,6 +475,13 @@ function MessageContent({
   content: string
   streaming?: boolean
 }) {
+  const segments = useMemo(() => splitAssistantSegments(content), [content])
+  const thinkTitle = (tag?: string) => {
+    if (tag === "redacted_thinking") return "思考过程（已脱敏）"
+    if (tag === "reasoning" || tag === "analysis") return "推理与分析"
+    return "思考过程"
+  }
+
   return (
     <div
       className="prose prose-sm max-w-none break-words select-text text-[15px] leading-relaxed text-slate-800
@@ -365,37 +492,42 @@ function MessageContent({
       [&_blockquote]:border-l-4 [&_blockquote]:border-amber-400/50 [&_blockquote]:bg-amber-50/60 [&_blockquote]:rounded-r-lg [&_blockquote]:pl-4 [&_blockquote]:py-2
       prose-strong:font-semibold prose-table:text-sm"
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          pre({ children }) {
-            return <>{children}</>
-          },
-          code({ className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || "")
-            const isBlock = !!match
-            if (isBlock) {
-              return (
-                <SyntaxHighlighter
-                  style={oneDark as Record<string, React.CSSProperties>}
-                  language={match[1]}
-                  PreTag="div"
-                  className="!rounded-xl !text-[13px] !my-3 !shadow-sm"
+      {segments.map((seg, idx) =>
+        seg.kind === "think" ? (
+          <details
+            key={`think-${idx}`}
+            className="not-prose my-3 rounded-xl border border-violet-200/90 bg-gradient-to-b from-violet-50/90 to-slate-50/40 text-[14px] shadow-sm open:shadow-md"
+          >
+            <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-violet-900 marker:content-none [&::-webkit-details-marker]:hidden">
+              <span className="inline-flex items-center gap-2">
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-600" />
+                {thinkTitle(seg.tag)}
+                <span className="text-xs font-normal text-violet-600/80">（点击展开）</span>
+              </span>
+            </summary>
+            <div className="border-t border-violet-100/90 px-3 py-2.5 text-slate-700">
+              {seg.body ? (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={chatMarkdownComponents}
                 >
-                  {String(children).replace(/\n$/, "")}
-                </SyntaxHighlighter>
-              )
-            }
-            return (
-              <code className={className} {...props}>
-                {children}
-              </code>
-            )
-          },
-        }}
-      >
-        {content}
-      </ReactMarkdown>
+                  {seg.body}
+                </ReactMarkdown>
+              ) : (
+                <p className="text-xs text-slate-500">（无可见内容）</p>
+              )}
+            </div>
+          </details>
+        ) : (
+          <ReactMarkdown
+            key={`md-${idx}`}
+            remarkPlugins={[remarkGfm]}
+            components={chatMarkdownComponents}
+          >
+            {seg.body}
+          </ReactMarkdown>
+        )
+      )}
       {streaming &&
         (content ? (
           <StreamingDots />
@@ -456,6 +588,8 @@ export default function ChatPage() {
   const messagesScrollRef = useRef<HTMLDivElement>(null)
   /** 仅在用户处于消息区底部附近时跟随流式输出滚动 */
   const followStreamOutputRef = useRef(true)
+  const activeSessionRef = useRef<ChatSession | null>(null)
+  const scrollFollowRafRef = useRef<number | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sendingRef = useRef(false)
@@ -464,6 +598,10 @@ export default function ChatPage() {
     if (!user?.email) return "用户"
     return user.email.split("@")[0] ?? user.email
   }, [user])
+
+  useEffect(() => {
+    activeSessionRef.current = activeSession
+  }, [activeSession])
 
   useEffect(() => {
     const saved =
@@ -479,8 +617,17 @@ export default function ChatPage() {
     localStorage.setItem(CHAT_MODEL_STORAGE_KEY, selectedModel)
   }, [selectedModel])
 
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  /** 只在消息列表容器内滚动，避免 scrollIntoView 带动整页/侧栏导致卡顿与点击失灵 */
+  const scrollMessagesToBottom = useCallback(() => {
+    const el = messagesScrollRef.current
+    if (!el || !followStreamOutputRef.current) return
+    if (scrollFollowRafRef.current != null) return
+    scrollFollowRafRef.current = window.requestAnimationFrame(() => {
+      scrollFollowRafRef.current = null
+      const box = messagesScrollRef.current
+      if (!box || !followStreamOutputRef.current) return
+      box.scrollTop = box.scrollHeight
+    })
   }, [])
 
   const isMessagesNearBottom = useCallback((el: HTMLDivElement) => {
@@ -496,8 +643,8 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!followStreamOutputRef.current) return
-    scrollToBottom()
-  }, [messages, scrollToBottom])
+    scrollMessagesToBottom()
+  }, [messages, scrollMessagesToBottom])
 
   useEffect(() => {
     if (!activeSession) return
@@ -517,10 +664,13 @@ export default function ChatPage() {
       setMessages([])
       return
     }
-    if (sendingRef.current) return
+    const sid = activeSession.id
     chatApi
-      .getMessages(activeSession.id)
-      .then(setMessages)
+      .getMessages(sid)
+      .then((rows) => {
+        if (activeSessionRef.current?.id !== sid) return
+        setMessages(rows)
+      })
       .catch(console.error)
   }, [activeSession])
 
@@ -571,11 +721,12 @@ export default function ChatPage() {
           context
         )
         streamedAssistant = await consumeChatSSE(res, (acc) => {
-          setMessages((prev) =>
-            prev.map((m) =>
+          setMessages((prev) => {
+            if (activeSessionRef.current?.id !== session.id) return prev
+            return prev.map((m) =>
               m.id === assistantMsg.id ? { ...m, content: acc, streaming: true } : m
             )
-          )
+          })
         })
       } catch (e: unknown) {
         streamError = e instanceof Error ? e.message : String(e)
@@ -586,7 +737,8 @@ export default function ChatPage() {
         setSending(false)
         chatApi
           .getMessages(session.id)
-          .then((serverMsgs) =>
+          .then((serverMsgs) => {
+            if (activeSessionRef.current?.id !== session.id) return
             setMessages(
               reconcileChatMessages(
                 serverMsgs,
@@ -595,14 +747,15 @@ export default function ChatPage() {
                 streamError
               )
             )
-          )
-          .catch(() =>
+          })
+          .catch(() => {
+            if (activeSessionRef.current?.id !== session.id) return
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantMsg.id ? { ...m, streaming: false } : m
               )
             )
-          )
+          })
       }
     },
     []
@@ -747,14 +900,16 @@ export default function ChatPage() {
 
   const handleRegenerate = async (assistantMsgId: number) => {
     if (sending || !activeSession) return
+    const regenSessionId = activeSession.id
     const assistantMsg = messages.find((m) => m.id === assistantMsgId)
     const modelToUse = assistantMsg?.model ?? selectedModel
 
-    setMessages((prev) =>
-      prev.map((m) =>
+    setMessages((prev) => {
+      if (activeSessionRef.current?.id !== regenSessionId) return prev
+      return prev.map((m) =>
         m.id === assistantMsgId ? { ...m, content: "", streaming: true } : m
       )
-    )
+    })
     setSending(true)
     sendingRef.current = true
     followStreamOutputRef.current = true
@@ -764,16 +919,17 @@ export default function ChatPage() {
 
     try {
       const res = await chatApi.regenerateStream(
-        activeSession.id,
+        regenSessionId,
         assistantMsgId,
         modelToUse
       )
       streamedAssistant = await consumeChatSSE(res, (acc) => {
-        setMessages((prev) =>
-          prev.map((m) =>
+        setMessages((prev) => {
+          if (activeSessionRef.current?.id !== regenSessionId) return prev
+          return prev.map((m) =>
             m.id === assistantMsgId ? { ...m, content: acc, streaming: true } : m
           )
-        )
+        })
       })
     } catch (e: unknown) {
       streamError = e instanceof Error ? e.message : String(e)
@@ -783,8 +939,9 @@ export default function ChatPage() {
       sendingRef.current = false
       setSending(false)
       chatApi
-        .getMessages(activeSession.id)
-        .then((serverMsgs) =>
+        .getMessages(regenSessionId)
+        .then((serverMsgs) => {
+          if (activeSessionRef.current?.id !== regenSessionId) return
           setMessages(
             reconcileChatMessages(
               serverMsgs,
@@ -793,7 +950,7 @@ export default function ChatPage() {
               streamError
             )
           )
-        )
+        })
         .catch(console.error)
     }
   }
@@ -1212,7 +1369,7 @@ export default function ChatPage() {
                         ) : null}
                         {!msg.streaming && (
                           <MessageToolbar
-                            onCopy={() => {
+                            onCopy={async () => {
                               let t = msg.content || ""
                               if (msg.attachments?.length) {
                                 const summary = msg.attachments
@@ -1229,7 +1386,7 @@ export default function ChatPage() {
                                   (t ? "\n\n" : "") +
                                   `*[${msg.attachments.length} 个附件：${summary}。界面中可查看文件]*`
                               }
-                              void navigator.clipboard.writeText(t)
+                              await copyTextToClipboard(t)
                             }}
                             onDelete={() => handleDeleteMessage(msg.id)}
                           />
@@ -1284,7 +1441,9 @@ export default function ChatPage() {
                                   }))
                                 }
                                 onCopy={() =>
-                                  navigator.clipboard.writeText(msg.content)
+                                  copyTextToClipboard(
+                                    assistantPlainTextForCopy(msg.content)
+                                  )
                                 }
                                 onRegenerate={() => handleRegenerate(msg.id)}
                                 onEdit={() => {
@@ -1602,7 +1761,7 @@ function MessageToolbar({
   onCopy,
   onDelete,
 }: {
-  onCopy: () => void
+  onCopy: () => void | Promise<void>
   onDelete: () => void
 }) {
   const [copied, setCopied] = useState(false)
@@ -1615,9 +1774,14 @@ function MessageToolbar({
         type="button"
         title="复制"
         onClick={async () => {
-          await onCopy()
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
+          try {
+            await Promise.resolve(onCopy())
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1500)
+          } catch (e) {
+            console.error(e)
+            window.alert("复制失败，请改为手动选中文字复制")
+          }
         }}
       >
         {copied ? (
@@ -1651,7 +1815,7 @@ function AssistantToolbar({
 }: {
   feedback?: "up" | "down"
   onFeedback: (dir: "up" | "down") => void
-  onCopy: () => void
+  onCopy: () => void | Promise<void>
   onRegenerate: () => void
   onEdit: () => void
   onDelete: () => void
@@ -1667,9 +1831,14 @@ function AssistantToolbar({
         type="button"
         title="复制"
         onClick={async () => {
-          await onCopy()
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
+          try {
+            await Promise.resolve(onCopy())
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1500)
+          } catch (e) {
+            console.error(e)
+            window.alert("复制失败，请改为手动选中文字复制")
+          }
         }}
       >
         {copied ? (

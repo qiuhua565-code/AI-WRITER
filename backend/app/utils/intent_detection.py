@@ -4,7 +4,65 @@ import logging
 from typing import Optional
 from dataclasses import dataclass
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
+
+# 过长用户正文易诱导模型「写文章」而非 JSON；意图识别只取前段
+_INTENT_USER_TEXT_MAX = 6000
+
+
+def _truncate_for_intent(user_message: str) -> str:
+    t = (user_message or "").strip()
+    if len(t) <= _INTENT_USER_TEXT_MAX:
+        return t
+    return t[:_INTENT_USER_TEXT_MAX] + f"\n\n[…已截断，原文共 {len(t)} 字，仅用于意图分析]"
+
+
+def _normalize_intent_raw_response(raw: str) -> str:
+    s = (raw or "").strip()
+    low = s[:12].lower()
+    if low.startswith("markdown"):
+        s = s[8:].lstrip()
+    if s.startswith("```json"):
+        s = s[7:]
+    if s.startswith("```"):
+        s = s[3:]
+    if s.endswith("```"):
+        s = s[:-3]
+    return s.strip()
+
+
+def _extract_first_json_object(s: str) -> str | None:
+    """从混杂输出中抠出第一个平衡花括号的 JSON 对象（支持 summary 等字段中带引号）。"""
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    string_char = ""
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == string_char:
+                in_string = False
+            continue
+        if ch in ('"', "'"):
+            in_string = True
+            string_char = ch
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
 
 
 @dataclass
@@ -56,6 +114,8 @@ async def detect_user_intent_with_llm(
 
 请以 JSON 格式返回，不要添加任何其他文字。
 
+【硬性约束】你只输出一个 JSON 对象。禁止输出 Markdown、禁止写文章、禁止输出标题或正文、禁止输出 ``` 代码块、禁止复述用户长文；第一个非空白字符必须是「{」，且整段输出仅为从该字符起与之配对闭合的一个 JSON 对象。
+
 示例：
 用户："请写一篇关于AI的文章，5000字"
 返回：{"word_count_requirement": 5000, "is_full_output": true, "is_continue_request": false, "is_check_request": false, "action": "generate", "target_section": null, "summary": "生成一篇5000字的AI文章"}
@@ -77,33 +137,21 @@ async def detect_user_intent_with_llm(
 """
 
     try:
-        # 调用 LLM 识别意图
+        user_for_intent = _truncate_for_intent(user_message)
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": user_for_intent},
         ]
 
-        response_text = ""
-        async for chunk in llm_client.stream(
+        # 单次 complete：比 stream 聚合更不易被网关/模型截断成非 JSON
+        completion = await llm_client.complete(
             api_key=api_key,
             messages=messages,
-            model="claude-sonnet-4-6",
-            max_tokens=500,
+            model=settings.LLM_DEFAULT_MODEL,
+            max_tokens=700,
             temperature=0,
-        ):
-            if chunk.content:
-                response_text += chunk.content
-
-        # 解析 JSON
-        # 移除可能的 markdown 代码块标记
-        response_text = response_text.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.startswith("```"):
-            response_text = response_text[3:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-        response_text = response_text.strip()
+        )
+        response_text = _normalize_intent_raw_response(completion.content)
 
         if not response_text:
             logger.warning(
@@ -114,13 +162,26 @@ async def detect_user_intent_with_llm(
         try:
             result = json.loads(response_text)
         except json.JSONDecodeError as je:
-            snippet = response_text[:200].replace("\n", " ")
-            logger.warning(
-                "Intent LLM returned non-JSON (parse at char %s); snippet=%r; using default intent",
-                getattr(je, "pos", None),
-                snippet,
-            )
-            raise
+            blob = _extract_first_json_object(response_text)
+            if blob:
+                try:
+                    result = json.loads(blob)
+                except json.JSONDecodeError as je2:
+                    snippet = response_text[:200].replace("\n", " ")
+                    logger.warning(
+                        "Intent JSON extract failed (char %s); snippet=%r; using default intent",
+                        getattr(je2, "pos", None),
+                        snippet,
+                    )
+                    raise je2
+            else:
+                snippet = response_text[:200].replace("\n", " ")
+                logger.warning(
+                    "Intent LLM returned non-JSON (parse at char %s); snippet=%r; using default intent",
+                    getattr(je, "pos", None),
+                    snippet,
+                )
+                raise
 
         intent = UserIntent(
             word_count_requirement=result.get("word_count_requirement"),

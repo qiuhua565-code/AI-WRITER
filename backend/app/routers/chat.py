@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, ConfigDict
 
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.models.chat import ChatSession, ChatMessage
 from app.models.user import User
 from app.utils.deps import get_current_user
@@ -543,53 +543,53 @@ async def regenerate_assistant(
     session_id: int,
     body: RegenerateRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session = (await db.execute(
-        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
-    )).scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    async with AsyncSessionLocal() as db:
+        session = (await db.execute(
+            select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
 
-    assistant = (await db.execute(
-        select(ChatMessage).where(
-            ChatMessage.id == body.assistant_message_id,
-            ChatMessage.session_id == session_id,
-            ChatMessage.role == "assistant",
-        )
-    )).scalar_one_or_none()
-    if not assistant:
-        raise HTTPException(status_code=404, detail="回复不存在")
+        assistant = (await db.execute(
+            select(ChatMessage).where(
+                ChatMessage.id == body.assistant_message_id,
+                ChatMessage.session_id == session_id,
+                ChatMessage.role == "assistant",
+            )
+        )).scalar_one_or_none()
+        if not assistant:
+            raise HTTPException(status_code=404, detail="回复不存在")
 
-    prev_user = (await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session_id, ChatMessage.created_at < assistant.created_at)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(1)
-    )).scalar_one_or_none()
-    if not prev_user or prev_user.role != "user":
-        raise HTTPException(status_code=400, detail="无法重新生成：缺少对应的用户消息")
+        prev_user = (await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id, ChatMessage.created_at < assistant.created_at)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        if not prev_user or prev_user.role != "user":
+            raise HTTPException(status_code=400, detail="无法重新生成：缺少对应的用户消息")
 
-    await db.delete(assistant)
-    session.updated_at = datetime.now(timezone.utc)
-    await db.commit()
+        await db.delete(assistant)
+        session.updated_at = datetime.now(timezone.utc)
+        await db.commit()
 
-    api_key = await _get_user_api_key(current_user.id, db)
+        api_key = await _get_user_api_key(current_user.id, db)
 
-    history = (await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(20)
-    )).scalars().all()
-    history.reverse()
-    messages = _history_to_llm_messages(list(history))
+        history = (await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(20)
+        )).scalars().all()
+        history.reverse()
+        messages = _history_to_llm_messages(list(history))
 
-    model = body.model or settings.LLM_DEFAULT_MODEL
+        model = body.model or settings.LLM_DEFAULT_MODEL
 
     return StreamingResponse(
-        _chat_generator(request, db, session_id, session, api_key, messages, model, editor_content=""),
+        _chat_generator(request, session_id, api_key, messages, model, editor_content=""),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -600,57 +600,57 @@ async def stream_chat(
     session_id: int,
     body: ChatStreamRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session = (await db.execute(
-        select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
-    )).scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    async with AsyncSessionLocal() as db:
+        session = (await db.execute(
+            select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not session:
+            raise HTTPException(status_code=404, detail="会话不存在")
 
-    _validate_attachment_parts(body.attachments)
-    mat = _materialize_user_message(body)
-    if (
-        not mat.display_text.strip()
-        and not mat.mm_attachments
-        and not mat.llm_text_suffix.strip()
-    ):
-        raise HTTPException(status_code=400, detail="请输入文字或上传附件（图片 / PDF / Word / 文本等）")
+        _validate_attachment_parts(body.attachments)
+        mat = _materialize_user_message(body)
+        if (
+            not mat.display_text.strip()
+            and not mat.mm_attachments
+            and not mat.llm_text_suffix.strip()
+        ):
+            raise HTTPException(status_code=400, detail="请输入文字或上传附件（图片 / PDF / Word / 文本等）")
 
-    api_key = await _get_user_api_key(current_user.id, db)
+        api_key = await _get_user_api_key(current_user.id, db)
 
-    # Save user message
-    user_msg = ChatMessage(
-        session_id=session_id,
-        role="user",
-        content=_serialize_user_message_materialized(mat),
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(user_msg)
-    session.updated_at = datetime.now(timezone.utc)
-    await db.commit()
+        # Save user message
+        user_msg = ChatMessage(
+            session_id=session_id,
+            role="user",
+            content=_serialize_user_message_materialized(mat),
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(user_msg)
+        session.updated_at = datetime.now(timezone.utc)
+        await db.commit()
 
-    # Build context from last 20 messages
-    history = (await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(20)
-    )).scalars().all()
-    history.reverse()
+        # Build context from last 20 messages
+        history = (await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(20)
+        )).scalars().all()
+        history.reverse()
 
-    messages = _history_to_llm_messages(list(history))
+        messages = _history_to_llm_messages(list(history))
 
-    model = body.model or settings.LLM_DEFAULT_MODEL
+        model = body.model or settings.LLM_DEFAULT_MODEL
 
-    # 提取编辑器内容（如果有）
-    editor_content = ""
-    if body.context and body.context.get('type') == 'editor_content':
-        editor_content = body.context.get('content', '')
+        # 提取编辑器内容（如果有）
+        editor_content = ""
+        if body.context and body.context.get('type') == 'editor_content':
+            editor_content = body.context.get('content', '')
 
     return StreamingResponse(
-        _chat_generator(request, db, session_id, session, api_key, messages, model, editor_content=editor_content),
+        _chat_generator(request, session_id, api_key, messages, model, editor_content=editor_content),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -728,7 +728,36 @@ async def _merge_llm_stream_with_heartbeats(
             pass
 
 
-async def _chat_generator(request: Request, db: AsyncSession, session_id: int, session: ChatSession, api_key: str, messages: list, model: str, editor_content: str = ""):
+async def _persist_assistant_message(
+    session_id: int,
+    content: str,
+    used_model: str | None,
+    tokens_in: int | None,
+    tokens_out: int | None,
+) -> None:
+    """流式结束后单独开会话写入 DB，避免长时间 SSE 占用 Depends 连接导致 PG/asyncpg 断开。"""
+    async with AsyncSessionLocal() as db:
+        session = (
+            await db.execute(select(ChatSession).where(ChatSession.id == session_id))
+        ).scalar_one_or_none()
+        if session is None:
+            logger.warning("persist assistant: session %s not found", session_id)
+            return
+        assistant_msg = ChatMessage(
+            session_id=session_id,
+            role="assistant",
+            content=content,
+            model=used_model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(assistant_msg)
+        session.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
+
+async def _chat_generator(request: Request, session_id: int, api_key: str, messages: list, model: str, editor_content: str = ""):
     """
     流式生成助手回复；支持智能字数控制：
     1. 使用 LLM 自动识别用户意图（字数要求、完整输出、继续请求、检查请求等）
@@ -1004,15 +1033,13 @@ async def _chat_generator(request: Request, db: AsyncSession, session_id: int, s
     finally:
         if full_response:
             content = "".join(full_response)
-            assistant_msg = ChatMessage(
-                session_id=session_id,
-                role="assistant",
-                content=content,
-                model=used_model,
-                tokens_in=tokens_in,
-                tokens_out=tokens_out,
-                created_at=datetime.now(timezone.utc),
-            )
-            db.add(assistant_msg)
-            session.updated_at = datetime.now(timezone.utc)
-            await db.commit()
+            try:
+                await _persist_assistant_message(
+                    session_id,
+                    content,
+                    used_model,
+                    tokens_in,
+                    tokens_out,
+                )
+            except Exception:
+                logger.exception("Failed to persist assistant message session=%s", session_id)
