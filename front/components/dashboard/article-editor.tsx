@@ -28,6 +28,7 @@ import {
   Trash2,
   GitCompare,
   ListChecks,
+  GripVertical,
 } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
@@ -218,6 +219,19 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
   const [articleCheckLoading, setArticleCheckLoading] = useState(false)
   const [articleCheckReport, setArticleCheckReport] = useState("")
   const [articleCheckModel, setArticleCheckModel] = useState("")
+  /** 审阅弹窗在视口内拖动偏移（标题栏拖拽） */
+  const [articleCheckDrag, setArticleCheckDrag] = useState({ x: 0, y: 0 })
+  const articleCheckDragRefPos = useRef(articleCheckDrag)
+  useEffect(() => {
+    articleCheckDragRefPos.current = articleCheckDrag
+  }, [articleCheckDrag])
+  const articleCheckDragRef = useRef({
+    active: false,
+    startX: 0,
+    startY: 0,
+    originX: 0,
+    originY: 0,
+  })
   const [smartApplyLoadingIdx, setSmartApplyLoadingIdx] = useState<number | null>(null)
 
   // Version history panel
@@ -518,6 +532,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
 
   const openArticleCheck = useCallback(() => {
     setArticleCheckOpen(true)
+    setArticleCheckDrag({ x: 0, y: 0 })
     setArticleCheckLoading(true)
     setArticleCheckReport("")
     setArticleCheckModel("")
@@ -1613,19 +1628,69 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
             setArticleCheckLoading(false)
             setArticleCheckReport("")
             setArticleCheckModel("")
+            setArticleCheckDrag({ x: 0, y: 0 })
           }
         }}
       >
-        <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
-          <DialogHeader className="shrink-0 border-b px-6 py-4 text-left">
-            <DialogTitle>全文审阅检查</DialogTitle>
-            <DialogDescription className="text-left text-xs text-muted-foreground">
-              {articleCheckModel
-                ? `本次调用模型：${articleCheckModel}`
-                : "对当前正文做结构化审阅（称谓、逻辑、时间线、免费/卡点、剧透、字数、重复、真实信息、分段等）。长文可能需数分钟，期间会持续推送心跳以防网关超时。"}
-            </DialogDescription>
-          </DialogHeader>
-          <ScrollArea className="min-h-[220px] max-h-[min(60vh,520px)] flex-1 px-6 py-3">
+        <DialogContent
+          className="flex w-[min(100vw-1rem,52rem)] max-w-[min(100vw-1rem,52rem)] max-h-[min(92vh,900px)] flex-col gap-0 overflow-hidden border-slate-200/80 p-0 shadow-2xl sm:max-w-[min(100vw-1rem,52rem)]"
+          style={{
+            transform: `translate(calc(-50% + ${articleCheckDrag.x}px), calc(-50% + ${articleCheckDrag.y}px))`,
+          }}
+        >
+          <div
+            className="flex shrink-0 cursor-grab touch-none items-start gap-2 border-b border-slate-200/80 bg-slate-50/90 px-4 py-3 select-none active:cursor-grabbing sm:px-5"
+            onPointerDown={(e) => {
+              if ((e.target as HTMLElement).closest("button")) return
+              const t = e.currentTarget
+              t.setPointerCapture(e.pointerId)
+              articleCheckDragRef.current = {
+                active: true,
+                startX: e.clientX,
+                startY: e.clientY,
+                originX: articleCheckDragRefPos.current.x,
+                originY: articleCheckDragRefPos.current.y,
+              }
+            }}
+            onPointerMove={(e) => {
+              const r = articleCheckDragRef.current
+              if (!r.active) return
+              setArticleCheckDrag({
+                x: r.originX + e.clientX - r.startX,
+                y: r.originY + e.clientY - r.startY,
+              })
+            }}
+            onPointerUp={(e) => {
+              const r = articleCheckDragRef.current
+              if (!r.active) return
+              r.active = false
+              try {
+                e.currentTarget.releasePointerCapture(e.pointerId)
+              } catch {
+                /* ignore */
+              }
+            }}
+            onPointerCancel={(e) => {
+              articleCheckDragRef.current.active = false
+              try {
+                e.currentTarget.releasePointerCapture(e.pointerId)
+              } catch {
+                /* ignore */
+              }
+            }}
+          >
+            <GripVertical className="mt-1 h-5 w-5 shrink-0 text-slate-400" aria-hidden />
+            <DialogHeader className="min-w-0 flex-1 space-y-1.5 border-0 p-0 text-left">
+              <DialogTitle className="pr-8 text-base sm:text-lg">全文审阅检查</DialogTitle>
+              <DialogDescription className="text-left text-xs text-muted-foreground">
+                {articleCheckModel
+                  ? `本次调用模型：${articleCheckModel}`
+                  : "对当前正文做结构化审阅（称谓、逻辑、时间线、免费/卡点、剧透、字数、重复、真实信息、分段等）。长文可能需数分钟，期间会持续推送心跳以防网关超时。"}
+              </DialogDescription>
+              <p className="text-[11px] text-slate-500">拖拽左侧抓手或本标题区域可移动窗口</p>
+            </DialogHeader>
+          </div>
+          <ScrollArea className="min-h-0 max-h-[min(70vh,680px)] flex-1 overflow-hidden px-4 py-3 sm:px-5">
             {articleCheckLoading ? (
               <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
                 <Loader2 className="h-5 w-5 shrink-0 animate-spin" />
@@ -1637,7 +1702,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
               </pre>
             )}
           </ScrollArea>
-          <DialogFooter className="shrink-0 border-t px-6 py-3">
+          <DialogFooter className="shrink-0 border-t border-slate-200/80 bg-white/95 px-4 py-3 sm:px-5">
             <Button type="button" variant="outline" onClick={() => setArticleCheckOpen(false)}>
               关闭
             </Button>
