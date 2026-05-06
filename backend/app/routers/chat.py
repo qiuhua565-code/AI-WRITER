@@ -16,6 +16,16 @@ from app.models.user import User
 from app.utils.deps import get_current_user
 from app.services.llm import llm_client
 from app.config import settings
+from app.utils.intent_detection import (
+    detect_user_intent_with_llm,
+    UserIntent,
+    generate_continue_prompt,
+    should_continue_for_word_count,
+    count_words,
+)
+from app.utils.word_count import (
+    detect_lazy_response,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
@@ -72,6 +82,7 @@ class ChatStreamRequest(BaseModel):
     content: str = ""
     model: str | None = None
     attachments: list[AttachmentPart] | None = None
+    context: dict | None = None  # 新增：上下文信息（如编辑器内容）
 
 
 @dataclass
@@ -575,7 +586,7 @@ async def regenerate_assistant(
     model = body.model or settings.LLM_DEFAULT_MODEL
 
     return StreamingResponse(
-        _chat_generator(request, db, session_id, session, api_key, messages, model),
+        _chat_generator(request, db, session_id, session, api_key, messages, model, editor_content=""),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -630,23 +641,40 @@ async def stream_chat(
 
     model = body.model or settings.LLM_DEFAULT_MODEL
 
+    # 提取编辑器内容（如果有）
+    editor_content = ""
+    if body.context and body.context.get('type') == 'editor_content':
+        editor_content = body.context.get('content', '')
+
     return StreamingResponse(
-        _chat_generator(request, db, session_id, session, api_key, messages, model),
+        _chat_generator(request, db, session_id, session, api_key, messages, model, editor_content=editor_content),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 def _chat_stream_should_continue(stop_reason: str | None) -> bool:
-    """Anthropic 为 max_tokens；部分 OpenAI 兼容中转用 length 表示输出触顶。"""
+    """
+    [已废弃] 原有的简单判断逻辑，现在由 should_continue_for_word_count 替代
+
+    Anthropic 为 max_tokens；部分 OpenAI 兼容中转用 length 表示输出触顶。
+    """
     if not stop_reason:
         return False
     r = str(stop_reason).strip().lower()
     return r in ("max_tokens", "length")
 
 
-async def _chat_generator(request: Request, db: AsyncSession, session_id: int, session: ChatSession, api_key: str, messages: list, model: str):
-    """流式生成助手回复；若上游 stop_reason=max_tokens，自动追加多轮续写并拼成一条消息。"""
+async def _chat_generator(request: Request, db: AsyncSession, session_id: int, session: ChatSession, api_key: str, messages: list, model: str, editor_content: str = ""):
+    """
+    流式生成助手回复；支持智能字数控制：
+    1. 使用 LLM 自动识别用户意图（字数要求、完整输出、继续请求、检查请求等）
+    2. 实时统计已输出字数
+    3. 字数不足时强制续写，直到满足要求
+    4. 在续写 prompt 中明确告知还差多少字
+    5. 检测 AI "偷懒"行为，自动重试
+    6. 支持文章检查功能
+    """
     full_response: list[str] = []
     tokens_in: int | None = None
     tokens_out: int | None = None
@@ -657,68 +685,235 @@ async def _chat_generator(request: Request, db: AsyncSession, session_id: int, s
     max_segments = max(1, settings.LLM_CHAT_MAX_SEGMENTS)
     stop_stream = False
 
+    # 使用 LLM 识别用户意图
+    user_intent: UserIntent | None = None
+    user_request = ""
+    editor_content = ""  # 编辑器内容（如果有）
+
+    # 检查是否有编辑器上下文
+    if body.context and body.context.get('type') == 'editor_content':
+        editor_content = body.context.get('content', '')
+        logger.info(
+            "Received editor context: %s words for session=%s",
+            count_words(editor_content),
+            session_id,
+        )
+
+    if messages:
+        last_user_msg = None
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user_msg = msg
+                break
+        if last_user_msg:
+            content = last_user_msg.get("content", "")
+            if isinstance(content, str):
+                user_request = content
+            elif isinstance(content, list):
+                # 处理多模态消息
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        user_request = block.get("text", "")
+                        break
+
+            # 使用 LLM 识别意图
+            if user_request:
+                try:
+                    user_intent = await detect_user_intent_with_llm(
+                        user_message=user_request,
+                        llm_client=llm_client,
+                        api_key=api_key,
+                    )
+                except Exception as e:
+                    logger.error("Failed to detect user intent: %s", e)
+                    # 降级：使用默认意图
+                    user_intent = UserIntent(
+                        word_count_requirement=None,
+                        is_full_output=False,
+                        is_continue_request=False,
+                        is_check_request=False,
+                        action="generate",
+                        summary="生成内容",
+                        target_section=None
+                    )
+
+    if user_intent:
+        logger.info(
+            "Detected user intent: word_count=%s, full_output=%s, continue=%s, check=%s, action=%s, target=%s, summary=%s (session=%s)",
+            user_intent.word_count_requirement,
+            user_intent.is_full_output,
+            user_intent.is_continue_request,
+            user_intent.is_check_request,
+            user_intent.action,
+            user_intent.target_section,
+            user_intent.summary,
+            session_id,
+        )
+
+    # 如果是检查请求，需要获取文章内容
+    article_to_check = ""
+    if user_intent and user_intent.is_check_request:
+        # 优先使用编辑器内容
+        if editor_content:
+            article_to_check = editor_content
+        else:
+            # 从对话历史中查找最近的助手回复（文章内容）
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and len(content) > 100:
+                        article_to_check = content
+                        break
+
+        if not article_to_check:
+            logger.warning("Check request but no article content found for session=%s", session_id)
+            # 可以提示用户需要提供文章内容
+        else:
+            logger.info(
+                "Check request: article length=%s words for session=%s",
+                count_words(article_to_check),
+                session_id,
+            )
+
+    # 重试机制：如果检测到 AI 偷懒，最多重试 1 次
+    max_retries = 1
+    retry_count = 0
+
     try:
         yield ": connected\n\n"
-        for seg_idx in range(max_segments):
-            if stop_stream:
-                break
-            msgs = base_messages if seg_idx == 0 else (
-                list(base_messages)
-                + [
-                    {"role": "assistant", "content": accumulated},
-                    {"role": "user", "content": settings.LLM_CHAT_CONTINUE_PROMPT},
-                ]
-            )
-            round_finish: str | None = None
-            round_parts: list[str] = []
 
-            async for chunk in llm_client.stream(
-                api_key=api_key,
-                messages=msgs,
-                model=model,
-                max_tokens=settings.LLM_CHAT_MAX_OUTPUT_TOKENS,
-                temperature=0.7,
-            ):
-                if await request.is_disconnected():
-                    stop_stream = True
-                    break
-                if chunk.content:
-                    round_parts.append(chunk.content)
-                    full_response.append(chunk.content)
-                    payload = json.dumps({"type": "token", "content": chunk.content}, ensure_ascii=False)
-                    yield f"event: token\ndata: {payload}\n\n"
-                if chunk.finish_reason:
-                    round_finish = chunk.finish_reason
-                    if _chat_stream_should_continue(chunk.finish_reason):
-                        logger.warning(
-                            "Chat segment %s hit output limit (%s) session=%s model=%s",
-                            seg_idx,
-                            chunk.finish_reason,
-                            session_id,
-                            model,
-                        )
-                    if chunk.usage_input_tokens is not None:
-                        tokens_in = (tokens_in or 0) + chunk.usage_input_tokens
-                    if chunk.usage_output_tokens is not None:
-                        tokens_out = (tokens_out or 0) + chunk.usage_output_tokens
+        while retry_count <= max_retries:
+            # 重置累积内容（重试时）
+            if retry_count > 0:
+                accumulated = ""
+                full_response = []
 
-            accumulated += "".join(round_parts)
-            last_finish = round_finish
+                # 发送重试警告到前端
+                warning_payload = json.dumps({
+                    "type": "warning",
+                    "message": "AI 响应不完整，正在重试..."
+                }, ensure_ascii=False)
+                yield f"event: warning\ndata: {warning_payload}\n\n"
 
-            if stop_stream:
-                break
-            if not _chat_stream_should_continue(round_finish):
-                break
-            if seg_idx == max_segments - 1:
                 logger.warning(
-                    "Chat stopped after max_segments=%s still at output limit (session=%s)",
-                    max_segments,
+                    "Detected lazy response, retrying (%s/%s) for session=%s",
+                    retry_count,
+                    max_retries,
                     session_id,
                 )
 
+            for seg_idx in range(max_segments):
+                if stop_stream:
+                    break
+
+                # 构建消息：第一轮用原始消息，后续轮次添加续写提示
+                if seg_idx == 0 and retry_count == 0:
+                    # 如果是检查请求，需要将文章内容添加到消息中
+                    if user_intent and user_intent.is_check_request and article_to_check:
+                        # 构建检查提示
+                        from app.utils.intent_detection import generate_check_prompt
+                        check_prompt = generate_check_prompt(article_to_check)
+
+                        # 替换用户的原始消息为检查提示
+                        msgs = list(base_messages[:-1]) + [
+                            {"role": "user", "content": check_prompt}
+                        ]
+                    else:
+                        msgs = base_messages
+                elif seg_idx == 0 and retry_count > 0:
+                    # 重试时，添加更强硬的提示
+                    msgs = list(base_messages) + [
+                        {
+                            "role": "user",
+                            "content": "请不要只是确认任务或重复我的话，直接开始输出完整的文章内容。从第一个字开始，完整输出，不要添加任何前缀（如'好的'、'明白了'等）。"
+                        }
+                    ]
+                else:
+                    # 使用智能续写提示
+                    continue_prompt = generate_continue_prompt(
+                        accumulated_text=accumulated,
+                        required_words=user_intent.word_count_requirement if user_intent else None,
+                        user_intent=user_intent,
+                    )
+                    msgs = list(base_messages) + [
+                        {"role": "assistant", "content": accumulated},
+                        {"role": "user", "content": continue_prompt},
+                    ]
+
+                round_finish: str | None = None
+                round_parts: list[str] = []
+
+                async for chunk in llm_client.stream(
+                    api_key=api_key,
+                    messages=msgs,
+                    model=model,
+                    max_tokens=settings.LLM_CHAT_MAX_OUTPUT_TOKENS,
+                    temperature=0.7,
+                ):
+                    if await request.is_disconnected():
+                        stop_stream = True
+                        break
+                    if chunk.content:
+                        round_parts.append(chunk.content)
+                        full_response.append(chunk.content)
+                        payload = json.dumps({"type": "token", "content": chunk.content}, ensure_ascii=False)
+                        yield f"event: token\ndata: {payload}\n\n"
+                    if chunk.finish_reason:
+                        round_finish = chunk.finish_reason
+                        if chunk.usage_input_tokens is not None:
+                            tokens_in = (tokens_in or 0) + chunk.usage_input_tokens
+                        if chunk.usage_output_tokens is not None:
+                            tokens_out = (tokens_out or 0) + chunk.usage_output_tokens
+
+                accumulated += "".join(round_parts)
+                last_finish = round_finish
+
+                if stop_stream:
+                    break
+
+                # 使用新的智能判断逻辑
+                should_continue, reason = should_continue_for_word_count(
+                    accumulated_text=accumulated,
+                    required_words=user_intent.word_count_requirement if user_intent else None,
+                    finish_reason=round_finish,
+                    segment_index=seg_idx,
+                    max_segments=max_segments,
+                )
+
+                if reason:
+                    logger.info(
+                        "Chat segment %s: %s (session=%s, model=%s)",
+                        seg_idx,
+                        reason,
+                        session_id,
+                        model,
+                    )
+
+                if not should_continue:
+                    break
+
+            # 检查是否偷懒（只在第一轮检查，避免无限重试）
+            if retry_count == 0 and detect_lazy_response(accumulated, user_request):
+                retry_count += 1
+                continue  # 重试
+            else:
+                # 响应正常或已达到最大重试次数，退出循环
+                break
+
         if full_response and not stop_stream:
+            # 在完成时发送字数统计信息
+            final_word_count = count_words(accumulated)
             done_reason = last_finish or "end_turn"
-            payload = json.dumps({"type": "done", "finish_reason": done_reason}, ensure_ascii=False)
+            done_payload = {
+                "type": "done",
+                "finish_reason": done_reason,
+                "word_count": final_word_count,
+            }
+            if user_intent and user_intent.word_count_requirement:
+                done_payload["required_words"] = user_intent.word_count_requirement
+                done_payload["word_count_satisfied"] = final_word_count >= user_intent.word_count_requirement
+
+            payload = json.dumps(done_payload, ensure_ascii=False)
             yield f"event: done\ndata: {payload}\n\n"
 
     except Exception as exc:

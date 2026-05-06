@@ -48,7 +48,10 @@
       "Bash(powershell *)",
       "Bash(dir D:\\\\AIwRITE\\\\AI-WRITER\\\\front\\\\src /s /b)",
       "Bash(cd /d D:\\\\AIwRITE\\\\AI-WRITER\\\\backend)",
-      "Bash(.venv\\\\Scripts\\\\python.exe scripts\\\\add_purpose_column.py)"
+      "Bash(.venv\\\\Scripts\\\\python.exe scripts\\\\add_purpose_column.py)",
+      "Bash(npm list:*)",
+      "Bash(grep -E \"^diff$\")",
+      "Bash(find backend/app/routers -name \"*.py\" -exec grep -l \"PATCH.*tasks.*content\" {} \\\\;)"
     ]
   }
 }

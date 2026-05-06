@@ -31,6 +31,9 @@ class Settings(BaseSettings):
         "上文可能因单次回复长度达到上限而暂停。请从上一段末尾无缝续写，不要重复已写过的段落，"
         "保持人设、语气与叙事连贯；若故事已自然结束请直接收束，勿赘述。"
     )
+    # 字数控制策略（可选配置）
+    # LLM_CHAT_QUALITY_FIRST: bool = False  # True=质量优先，允许字数略少
+    # LLM_CHAT_WORD_COUNT_TOLERANCE: float = 0.95  # 质量优先模式下的容忍度（0.95=95%）
 
     # Encryption (AES-GCM for API keys)
     ENCRYPTION_KEY: str = ""  # 32-byte hex, generate with: python -c "import secrets; print(secrets.token_hex(32))"

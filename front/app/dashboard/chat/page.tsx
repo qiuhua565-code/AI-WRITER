@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
+import { diffWords } from "diff"
+import type { Change } from "diff"
 import {
   Plus,
   Trash2,
@@ -27,11 +29,22 @@ import {
   FileType,
   X,
   FileText,
+  BookOpen,
+  GitCompare,
+  ClipboardCheck,
+  Loader2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog"
 import {
   Select,
   SelectContent,
@@ -55,7 +68,7 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { cn } from "@/lib/utils"
-import { chatApi, ChatSession, ChatMessage, ChatAttachmentPart, isDocAttachmentMeta } from "@/lib/api"
+import { chatApi, ChatSession, ChatMessage, ChatAttachmentPart, isDocAttachmentMeta, tasksApi } from "@/lib/api"
 import { useAuthStore } from "@/lib/store/auth"
 import {
   CHAT_MODEL_OPTIONS,
@@ -425,6 +438,20 @@ export default function ChatPage() {
   >([])
   const [fileDragOver, setFileDragOver] = useState(false)
 
+  // ── 关联文章 ──────────────────────────────────────────────────────────────
+  const [linkedTask, setLinkedTask] = useState<{ id: number; title: string; content: string } | null>(null)
+  const [taskPickerOpen, setTaskPickerOpen] = useState(false)
+  const [availableTasks, setAvailableTasks] = useState<{ id: number; title: string; status: string }[]>([])
+  const [loadingTasks, setLoadingTasks] = useState(false)
+
+  // ── Diff 弹窗 ─────────────────────────────────────────────────────────────
+  const [diffDialog, setDiffDialog] = useState<{
+    oldText: string
+    newText: string
+    taskId: number
+  } | null>(null)
+  const [applying, setApplying] = useState(false)
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -488,7 +515,8 @@ export default function ChatPage() {
       session: ChatSession,
       content: string,
       modelForStream: string,
-      attachments?: ChatAttachmentPart[]
+      attachments?: ChatAttachmentPart[],
+      context?: { type: string; content: string }
     ) => {
       const userMsg: DisplayMessage = {
         id: Date.now(),
@@ -518,7 +546,8 @@ export default function ChatPage() {
           session.id,
           content,
           modelForStream,
-          attachments
+          attachments,
+          context
         )
         streamedAssistant = await consumeChatSSE(res, (acc) => {
           setMessages((prev) =>
@@ -557,6 +586,49 @@ export default function ChatPage() {
     },
     []
   )
+
+  // ── 关联文章相关 ──────────────────────────────────────────────────────────
+  const loadAvailableTasks = useCallback(async () => {
+    setLoadingTasks(true)
+    try {
+      const data = await tasksApi.list({ page_size: 50 })
+      setAvailableTasks(
+        data.items
+          .filter((t) => t.status === "review" || t.status === "approved")
+          .map((t) => ({ id: t.id, title: t.title, status: t.status }))
+      )
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoadingTasks(false)
+    }
+  }, [])
+
+  const handleLinkTask = useCallback(async (taskId: number, title: string) => {
+    try {
+      const detail = await tasksApi.get(taskId)
+      setLinkedTask({ id: taskId, title, content: detail.content ?? "" })
+      setTaskPickerOpen(false)
+    } catch (e) {
+      console.error(e)
+    }
+  }, [])
+
+  const handleApplyDiff = useCallback(async (taskId: number, newContent: string) => {
+    setApplying(true)
+    try {
+      const res = await tasksApi.updateContent(taskId, newContent)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      // 更新本地关联文章的内容
+      setLinkedTask((prev) => prev ? { ...prev, content: newContent } : null)
+      setDiffDialog(null)
+    } catch (e) {
+      console.error(e)
+      alert("应用失败，请重试")
+    } finally {
+      setApplying(false)
+    }
+  }, [])
 
   const handleNewSession = async () => {
     try {
@@ -649,7 +721,7 @@ export default function ChatPage() {
       )
     }
 
-    await streamToSession(session, text, selectedModel, attachments)
+    await streamToSession(session, text, selectedModel, attachments, linkedTask ? { type: 'editor_content', content: linkedTask.content } : undefined)
   }
 
   const handleRegenerate = async (assistantMsgId: number) => {
@@ -930,21 +1002,93 @@ export default function ChatPage() {
         onDrop={handleMainDrop}
       >
         {/* 顶栏 */}
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-background/95 px-4 pt-10 md:pt-0 backdrop-blur-md">
-          <div className="min-w-0 flex items-center gap-2 pl-10 md:pl-0">
-            <h1 className="truncate text-sm font-semibold text-slate-900 md:text-base">
-              {activeSession?.title ?? "新对话"}
-            </h1>
+        <header className="flex h-auto shrink-0 flex-col border-b border-border bg-background/95 backdrop-blur-md">
+          <div className="flex h-14 items-center justify-between px-4 pt-10 md:pt-0">
+            <div className="min-w-0 flex items-center gap-2 pl-10 md:pl-0">
+              <h1 className="truncate text-sm font-semibold text-slate-900 md:text-base">
+                {activeSession?.title ?? "新对话"}
+              </h1>
+            </div>
+            <div className="flex items-center gap-2">
+              {linkedTask && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-xs border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                  onClick={async () => {
+                    const text = "请帮我全面检查这篇文章"
+                    setInput("")
+                    let session = activeSession
+                    if (!session) {
+                      try {
+                        sendingRef.current = true
+                        session = await chatApi.createSession(text.slice(0, 24))
+                        setSessions((prev) => [session!, ...prev])
+                        setActiveSession(session)
+                      } catch (e) {
+                        sendingRef.current = false
+                        console.error(e)
+                        return
+                      }
+                    }
+                    await streamToSession(
+                      session,
+                      text,
+                      selectedModel,
+                      undefined,
+                      { type: 'editor_content', content: linkedTask.content }
+                    )
+                  }}
+                  disabled={sending}
+                  type="button"
+                >
+                  <ClipboardCheck className="h-3.5 w-3.5" />
+                  一键检查
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn(
+                  "gap-1.5 text-xs",
+                  linkedTask
+                    ? "border-primary/40 bg-primary/5 text-primary"
+                    : "border-slate-200 text-slate-600"
+                )}
+                onClick={() => {
+                  loadAvailableTasks()
+                  setTaskPickerOpen(true)
+                }}
+                type="button"
+              >
+                <BookOpen className="h-3.5 w-3.5" />
+                {linkedTask ? linkedTask.title.slice(0, 12) + (linkedTask.title.length > 12 ? "…" : "") : "关联文章"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="hidden text-slate-600 sm:inline-flex"
+                type="button"
+                onClick={() => activeSession && chatApi.getMessages(activeSession.id).then(setMessages)}
+              >
+                刷新消息
+              </Button>
+            </div>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="hidden text-slate-600 sm:inline-flex"
-            type="button"
-            onClick={() => activeSession && chatApi.getMessages(activeSession.id).then(setMessages)}
-          >
-            刷新消息
-          </Button>
+          {linkedTask && (
+            <div className="flex items-center gap-2 border-t border-amber-100 bg-amber-50/60 px-4 py-1.5 text-xs text-amber-800">
+              <BookOpen className="h-3.5 w-3.5 shrink-0" />
+              <span>已关联：<span className="font-medium">{linkedTask.title}</span></span>
+              <span className="text-amber-600">·</span>
+              <span>{linkedTask.content.length > 0 ? `${Math.round(linkedTask.content.replace(/[^\u4e00-\u9fff]/g, '').length)}+ 字` : "空文章"}</span>
+              <button
+                className="ml-auto text-amber-600 hover:text-amber-900"
+                onClick={() => setLinkedTask(null)}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
         </header>
 
         {/* 公告条 */}
@@ -1122,6 +1266,16 @@ export default function ChatPage() {
                                   setEditDraft(msg.content)
                                 }}
                                 onDelete={() => handleDeleteMessage(msg.id)}
+                                onDiff={
+                                  linkedTask && msg.content.length > 200
+                                    ? () =>
+                                        setDiffDialog({
+                                          oldText: linkedTask.content,
+                                          newText: msg.content,
+                                          taskId: linkedTask.id,
+                                        })
+                                    : undefined
+                                }
                               />
                             )}
                           </>
@@ -1345,6 +1499,74 @@ export default function ChatPage() {
             </Button>
           </div>
         </div>
+
+        {/* 关联文章选择弹窗 */}
+        <Dialog open={taskPickerOpen} onOpenChange={setTaskPickerOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <BookOpen className="h-4 w-4" />
+                选择关联文章
+              </DialogTitle>
+            </DialogHeader>
+            <div className="py-2">
+              {loadingTasks ? (
+                <div className="flex items-center justify-center py-8 text-slate-500">
+                  <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                  加载中…
+                </div>
+              ) : availableTasks.length === 0 ? (
+                <div className="py-8 text-center text-sm text-slate-500">
+                  暂无可关联的文章（需要状态为"待审核"或"已通过"）
+                </div>
+              ) : (
+                <ScrollArea className="max-h-72">
+                  <div className="space-y-1 pr-2">
+                    {availableTasks.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        className={cn(
+                          "w-full rounded-lg px-3 py-2.5 text-left text-sm transition-colors hover:bg-slate-100",
+                          linkedTask?.id === t.id && "bg-primary/10 text-primary"
+                        )}
+                        onClick={() => handleLinkTask(t.id, t.title)}
+                      >
+                        <div className="font-medium">{t.title}</div>
+                        <div className="mt-0.5 text-xs text-slate-500">
+                          {t.status === "review" ? "待审核" : "已通过"}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </ScrollArea>
+              )}
+            </div>
+            {linkedTask && (
+              <div className="border-t pt-3">
+                <button
+                  type="button"
+                  className="text-xs text-destructive hover:underline"
+                  onClick={() => { setLinkedTask(null); setTaskPickerOpen(false) }}
+                >
+                  取消关联
+                </button>
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
+
+        {/* Diff 对比弹窗 */}
+        {diffDialog && (
+          <DiffDialog
+            oldText={diffDialog.oldText}
+            newText={diffDialog.newText}
+            taskId={diffDialog.taskId}
+            applying={applying}
+            onClose={() => setDiffDialog(null)}
+            onApply={() => handleApplyDiff(diffDialog.taskId, diffDialog.newText)}
+          />
+        )}
       </div>
     </div>
   )
@@ -1399,6 +1621,7 @@ function AssistantToolbar({
   onRegenerate,
   onEdit,
   onDelete,
+  onDiff,
 }: {
   feedback?: "up" | "down"
   onFeedback: (dir: "up" | "down") => void
@@ -1406,6 +1629,7 @@ function AssistantToolbar({
   onRegenerate: () => void
   onEdit: () => void
   onDelete: () => void
+  onDiff?: () => void
 }) {
   const [copied, setCopied] = useState(false)
   return (
@@ -1474,6 +1698,19 @@ function AssistantToolbar({
       >
         <Pencil className="h-3.5 w-3.5" />
       </Button>
+      {onDiff && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 gap-1.5 px-2 text-xs text-primary hover:bg-primary/10"
+          type="button"
+          title="与原文对比，并一键应用"
+          onClick={onDiff}
+        >
+          <GitCompare className="h-3.5 w-3.5" />
+          对比原文
+        </Button>
+      )}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -1493,5 +1730,98 @@ function AssistantToolbar({
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
+  )
+}
+
+function DiffDialog({
+  oldText,
+  newText,
+  applying,
+  onClose,
+  onApply,
+}: {
+  oldText: string
+  newText: string
+  taskId: number
+  applying: boolean
+  onClose: () => void
+  onApply: () => void
+}) {
+  const diffs = diffWords(oldText, newText)
+  const oldWordCount = oldText.replace(/[^\u4e00-\u9fff]/g, "").length
+  const newWordCount = newText.replace(/[^\u4e00-\u9fff]/g, "").length
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-3xl h-[80vh] flex flex-col p-0">
+        <DialogHeader className="shrink-0 px-6 pt-5 pb-3 border-b">
+          <DialogTitle className="flex items-center gap-2">
+            <GitCompare className="h-4 w-4" />
+            对比原文
+          </DialogTitle>
+          <p className="text-xs text-slate-500 mt-1">
+            字数：{oldWordCount.toLocaleString()} → {newWordCount.toLocaleString()} 字
+            {newWordCount > oldWordCount
+              ? <span className="ml-1 text-emerald-600">（+{(newWordCount - oldWordCount).toLocaleString()}）</span>
+              : newWordCount < oldWordCount
+              ? <span className="ml-1 text-rose-600">（-{(oldWordCount - newWordCount).toLocaleString()}）</span>
+              : null
+            }
+          </p>
+        </DialogHeader>
+
+        <ScrollArea className="flex-1 px-6 py-4">
+          <div className="font-serif text-[15px] leading-8 text-slate-800 whitespace-pre-wrap break-words">
+            {diffs.map((part: Change, i: number) => {
+              if (part.removed) {
+                return (
+                  <span
+                    key={i}
+                    className="bg-rose-100 text-rose-700 line-through decoration-rose-400"
+                  >
+                    {part.value}
+                  </span>
+                )
+              }
+              if (part.added) {
+                return (
+                  <span
+                    key={i}
+                    className="bg-emerald-100 text-emerald-800"
+                  >
+                    {part.value}
+                  </span>
+                )
+              }
+              return <span key={i}>{part.value}</span>
+            })}
+          </div>
+        </ScrollArea>
+
+        <DialogFooter className="shrink-0 px-6 py-4 border-t bg-slate-50/80">
+          <div className="flex w-full items-center justify-between">
+            <p className="text-xs text-slate-500">
+              <span className="inline-block w-3 h-3 rounded-sm bg-emerald-100 border border-emerald-300 mr-1" />
+              新增
+              <span className="inline-block w-3 h-3 rounded-sm bg-rose-100 border border-rose-300 ml-3 mr-1" />
+              删除
+            </p>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={onClose} disabled={applying}>
+                取消
+              </Button>
+              <Button onClick={onApply} disabled={applying} className="gap-1.5">
+                {applying ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                应用到文章
+              </Button>
+            </div>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

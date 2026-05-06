@@ -144,6 +144,17 @@ export const tasksApi = {
         'ngrok-skip-browser-warning': 'true',
       },
     }),
+
+  updateContent: (id: number, content: string) =>
+    fetch(`${BASE}/tasks/${id}/content`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${getToken() ?? ''}`,
+        'ngrok-skip-browser-warning': 'true',
+      },
+      body: JSON.stringify({ content }),
+    }),
 }
 
 // ─── API Keys (multi-provider) ───────────────────────────────────────────────
@@ -393,7 +404,8 @@ export const chatApi = {
     sessionId: number,
     content: string,
     model?: string,
-    attachments?: ChatAttachmentPart[]
+    attachments?: ChatAttachmentPart[],
+    context?: { type: string; content: string }
   ) =>
     fetch(`${BASE}/chat/sessions/${sessionId}/stream`, {
       method: 'POST',
@@ -415,6 +427,7 @@ export const chatApi = {
               }
             })
           : undefined,
+        context: context ?? undefined,
       }),
     }),
 }
