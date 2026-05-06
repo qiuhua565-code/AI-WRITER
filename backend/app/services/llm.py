@@ -51,6 +51,12 @@ class LLMClient:
     def _client(self, api_key: str, timeout: httpx.Timeout = _STREAM_TIMEOUT) -> anthropic.AsyncAnthropic:
         # trust_env=False：禁止 httpx 读取系统 HTTP_PROXY/HTTPS_PROXY 环境变量，
         # 避免请求被意外转发到系统代理而无法连接中转站。
+        logger.warning(
+            "🔑 LLM Client Config | base_url=%s | api_key=%s...%s",
+            self.base_url,
+            api_key[:12] if len(api_key) > 12 else api_key[:4],
+            api_key[-6:] if len(api_key) > 12 else ""
+        )
         http_client = httpx.AsyncClient(timeout=timeout, trust_env=False)
         return anthropic.AsyncAnthropic(
             api_key=api_key,
@@ -70,6 +76,10 @@ class LLMClient:
         response_format: dict | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         use_model = model or settings.LLM_DEFAULT_MODEL
+        logger.warning(
+            "📤 LLM Stream Request | model=%s | max_tokens=%d | temp=%.2f | msg_count=%d",
+            use_model, max_tokens, temperature, len(messages)
+        )
         system, chat_messages = _split_messages(messages)
         client = self._client(api_key, _STREAM_TIMEOUT)
 
@@ -107,6 +117,10 @@ class LLMClient:
         read_timeout: float | None = None,
     ) -> CompletionResult:
         use_model = model or settings.LLM_DEFAULT_MODEL
+        logger.info(
+            "📤 LLM Complete Request | model=%s | max_tokens=%d | temp=%.2f | msg_count=%d",
+            use_model, max_tokens, temperature, len(messages)
+        )
         system, chat_messages = _split_messages(messages)
         timeout = (
             httpx.Timeout(connect=60.0, read=read_timeout, write=120.0, pool=60.0)

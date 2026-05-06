@@ -370,9 +370,12 @@ def _serialize_message_api(m: ChatMessage) -> dict:
 
 async def _get_user_api_key(user_id: int, db: AsyncSession) -> str:
     from app.services.key_pool import get_key_for_chat
+    logger.warning("🔍 Fetching API key for chat | user_id=%d", user_id)
     key = await get_key_for_chat(db, user_id)
     if not key:
+        logger.error("❌ No API key available | user_id=%d", user_id)
         raise HTTPException(status_code=503, detail="未配置可用的 API Key：请在设置中绑定您自己的 Key，或由管理员配置系统 Key")
+    logger.warning("✅ API key retrieved | user_id=%d | key=%s...%s", user_id, key[:12], key[-6:])
     return key
 
 
@@ -840,40 +843,18 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
         )
 
         article_to_check = ""
-        if user_request:
-            intent_task = asyncio.create_task(
-                detect_user_intent_with_llm(
-                    user_message=user_request,
-                    llm_client=llm_client,
-                    api_key=api_key,
-                )
-            )
-            while not intent_task.done():
-                done, _ = await asyncio.wait({intent_task}, timeout=heartbeat_interval)
-                if intent_task in done:
-                    break
-                if await request.is_disconnected():
-                    intent_task.cancel()
-                    try:
-                        await intent_task
-                    except asyncio.CancelledError:
-                        pass
-                    return
-                yield ": heartbeat\n\n"
-                last_heartbeat = time.time()
-            try:
-                user_intent = intent_task.result()
-            except Exception as e:
-                logger.error("Failed to detect user intent: %s", e)
-                user_intent = UserIntent(
-                    word_count_requirement=None,
-                    is_full_output=False,
-                    is_continue_request=False,
-                    is_check_request=False,
-                    action="generate",
-                    summary="生成内容",
-                    target_section=None,
-                )
+        # 暂时禁用意图识别，直接使用默认意图
+        logger.info("⚠️ Intent detection DISABLED for debugging | session=%s", session_id)
+        user_intent = UserIntent(
+            word_count_requirement=18000,  # 默认 18000 字
+            is_full_output=True,
+            is_continue_request=False,
+            is_check_request=False,
+            action="generate",
+            summary="生成内容",
+            target_section=None,
+        )
+        logger.info("✅ Using default intent | word_count=18000 | session=%s", session_id)
 
         if user_intent:
             logger.info(
@@ -948,10 +929,13 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                         msgs = list(base_messages[:-1]) + [
                             {"role": "user", "content": check_prompt}
                         ]
+                        logger.info("📝 Check request | article_len=%d", len(article_to_check))
                     else:
                         msgs = base_messages
+                        logger.info("📤 Initial request | session=%s | seg=%d", session_id, seg_idx)
                 elif seg_idx == 0 and retry_count > 0:
                     # 重试时，添加更强硬的提示
+                    logger.info("🔄 Retry request | session=%s | retry=%d", session_id, retry_count)
                     msgs = list(base_messages) + [
                         {
                             "role": "user",
@@ -965,10 +949,22 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                         required_words=user_intent.word_count_requirement if user_intent else None,
                         user_intent=user_intent,
                     )
+                    logger.info(
+                        "➕ Continue request | session=%s | seg=%d | current_words=%d | required=%s",
+                        session_id, seg_idx, count_words(accumulated),
+                        user_intent.word_count_requirement if user_intent else "None"
+                    )
                     msgs = list(base_messages) + [
                         {"role": "assistant", "content": accumulated},
                         {"role": "user", "content": continue_prompt},
                     ]
+
+                logger.info(
+                    "🚀 LLM Stream Starting | session=%s | seg=%d | model=%s | max_tokens=%d | api_key=%s...%s",
+                    session_id, seg_idx, model, settings.LLM_CHAT_MAX_OUTPUT_TOKENS,
+                    api_key[:12] if len(api_key) > 12 else api_key[:4],
+                    api_key[-6:] if len(api_key) > 12 else ""
+                )
 
                 round_finish: str | None = None
                 round_parts: list[str] = []

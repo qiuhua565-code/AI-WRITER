@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -8,6 +9,13 @@ from app.routers.admin import router as admin_router
 from app.routers.admin_api_keys import router as admin_api_keys_router
 from app.routers.api_keys import router as api_keys_router
 from app.routers.chat import router as chat_router
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 app = FastAPI(
     title="AI-StoryFlow API",

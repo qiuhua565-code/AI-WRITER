@@ -69,10 +69,24 @@ async def get_user_bound_key_for_chat(db: AsyncSession, user_id: int) -> str | N
     ).scalars().all()
     if rows:
         row = random.choice(rows)
-        return decrypt_api_key(row.key_encrypted)
+        decrypted_key = decrypt_api_key(row.key_encrypted)
+        logger.warning(
+            "🔐 Using user chat key | user_id=%d | provider=%s | purpose=%s | label=%s | key=%s...%s",
+            user_id, row.provider, row.purpose, row.label or "(无标签)",
+            decrypted_key[:12] if len(decrypted_key) > 12 else decrypted_key[:4],
+            decrypted_key[-6:] if len(decrypted_key) > 12 else ""
+        )
+        return decrypted_key
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user and user.llm_api_key_encrypted:
-        return decrypt_api_key(user.llm_api_key_encrypted)
+        decrypted_key = decrypt_api_key(user.llm_api_key_encrypted)
+        logger.warning(
+            "🔐 Using legacy user key | user_id=%d | key=%s...%s",
+            user_id,
+            decrypted_key[:12] if len(decrypted_key) > 12 else decrypted_key[:4],
+            decrypted_key[-6:] if len(decrypted_key) > 12 else ""
+        )
+        return decrypted_key
     return None
 
 

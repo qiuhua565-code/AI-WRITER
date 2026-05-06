@@ -144,6 +144,15 @@ async def detect_user_intent_with_llm(
             {"role": "user", "content": user_for_intent},
         ]
 
+        logger.info(
+            "🎯 Intent Detection | user_msg_len=%d | model=%s | api_key=%s...%s",
+            len(user_for_intent),
+            settings.LLM_DEFAULT_MODEL,
+            api_key[:12] if len(api_key) > 12 else api_key[:4],
+            api_key[-6:] if len(api_key) > 12 else ""
+        )
+        logger.debug("Intent detection prompt: %s", system_prompt[:500])
+
         # 单次 complete：比 stream 聚合更不易被网关/模型截断成非 JSON
         completion = await llm_client.complete(
             api_key=api_key,
