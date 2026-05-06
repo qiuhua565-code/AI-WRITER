@@ -16,7 +16,14 @@ RUN pnpm install --frozen-lockfile
 # ── builder ───────────────────────────────────────────────────────────────────
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY package.json pnpm-lock.yaml ./
+COPY next.config.mjs tsconfig.json postcss.config.mjs ./
+COPY app ./app
+COPY components ./components
+COPY lib ./lib
+COPY public ./public
+COPY styles ./styles
+COPY .env* ./
 
 ARG NEXT_PUBLIC_APP_NAME=AI-StoryFlow
 ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME

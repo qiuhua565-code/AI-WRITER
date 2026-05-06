@@ -1,6 +1,8 @@
+import asyncio
 import base64
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -685,19 +687,14 @@ async def _chat_generator(request: Request, db: AsyncSession, session_id: int, s
     max_segments = max(1, settings.LLM_CHAT_MAX_SEGMENTS)
     stop_stream = False
 
+    # SSE 心跳：防止长时间无数据导致连接超时
+    last_heartbeat = time.time()
+    heartbeat_interval = 15  # 每 15 秒发送一次心跳
+
     # 使用 LLM 识别用户意图
     user_intent: UserIntent | None = None
     user_request = ""
-    editor_content = ""  # 编辑器内容（如果有）
-
-    # 检查是否有编辑器上下文
-    if body.context and body.context.get('type') == 'editor_content':
-        editor_content = body.context.get('content', '')
-        logger.info(
-            "Received editor context: %s words for session=%s",
-            count_words(editor_content),
-            session_id,
-        )
+    # editor_content 已经从外层传入，不需要再从 body 提取
 
     if messages:
         last_user_msg = None
@@ -853,11 +850,19 @@ async def _chat_generator(request: Request, db: AsyncSession, session_id: int, s
                     if await request.is_disconnected():
                         stop_stream = True
                         break
+
+                    # 心跳检测：如果超过 heartbeat_interval 秒没有发送数据，发送心跳注释
+                    current_time = time.time()
+                    if current_time - last_heartbeat > heartbeat_interval:
+                        yield ": heartbeat\n\n"
+                        last_heartbeat = current_time
+
                     if chunk.content:
                         round_parts.append(chunk.content)
                         full_response.append(chunk.content)
                         payload = json.dumps({"type": "token", "content": chunk.content}, ensure_ascii=False)
                         yield f"event: token\ndata: {payload}\n\n"
+                        last_heartbeat = current_time  # 发送数据后重置心跳计时
                     if chunk.finish_reason:
                         round_finish = chunk.finish_reason
                         if chunk.usage_input_tokens is not None:

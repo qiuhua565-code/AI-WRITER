@@ -51,7 +51,12 @@
       "Bash(.venv\\\\Scripts\\\\python.exe scripts\\\\add_purpose_column.py)",
       "Bash(npm list:*)",
       "Bash(grep -E \"^diff$\")",
-      "Bash(find backend/app/routers -name \"*.py\" -exec grep -l \"PATCH.*tasks.*content\" {} \\\\;)"
+      "Bash(find backend/app/routers -name \"*.py\" -exec grep -l \"PATCH.*tasks.*content\" {} \\\\;)",
+      "Bash(find app/models -name \"*.py\" -exec grep -l \"ChatMessage\\\\|ChatSession\" {} \\\\;)",
+      "Read(//www/wwwroot/**)",
+      "Bash(docker-compose -f docker-compose.app-only.yml up -d)",
+      "Bash(docker-compose -f docker-compose.app-only.yml ps)",
+      "Bash(docker-compose -f docker-compose.app-only.yml logs frontend --tail 50)"
     ]
   }
 }
