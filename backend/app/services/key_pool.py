@@ -2,11 +2,18 @@
 API Key 池管理。
 管理员可配置多个 system key，每个 key 同时只能被一个任务占用。
 通过 Redis 分布式锁实现互斥。
+
+写稿任务取 key 时**统一**走互斥锁：
+- 系统池 key   → 锁名 `key_lock:{key_id}`（保留旧约定，admin UI 据此判断 in_use）。
+- 用户绑定 key → 锁名 `key_lock:user_bound:{sha256(plaintext)[:16]}`。
+  同一明文 key 不论被几个用户绑定，都共享一把锁，避免上游被并发滥用导致 429。
 """
 
 import asyncio
+import hashlib
 import logging
 import random
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +26,7 @@ from app.utils.security import decrypt_api_key
 logger = logging.getLogger(__name__)
 
 LOCK_PREFIX = "key_lock:"   # Redis 锁前缀，router 也用这个判断 in_use
+USER_BOUND_LOCK_PREFIX = f"{LOCK_PREFIX}user_bound:"
 LOCK_TTL = 360              # 锁过期时间（秒），心跳每 60s 续期
 HEARTBEAT_INTERVAL = 60     # 心跳间隔（秒）
 
@@ -29,6 +37,29 @@ class NoKeyConfiguredError(RuntimeError):
 
 class NoKeyAvailableError(RuntimeError):
     """所有 key 都在被其他任务占用。"""
+
+
+@dataclass
+class KeyLease:
+    """对一个已加锁的 LLM key 的租约；持有期间锁不会被别的任务抢到。
+
+    fields:
+        api_key:        明文 key，传给 LLMClient
+        lock_key:       Redis 锁的完整 key（用于 release / heartbeat）
+        system_key_id:  仅当来自系统池时有值（admin UI 据 id 判断 in_use）
+        is_user_bound:  True 表示用户在「设置」里绑定的 key
+    """
+
+    api_key: str
+    lock_key: str
+    system_key_id: int | None
+    is_user_bound: bool
+
+
+def _user_bound_lock_key(plaintext_api_key: str) -> str:
+    """同一明文 key 全局唯一一把锁，避免不同用户用同一个 key 时仍并发限流。"""
+    digest = hashlib.sha256(plaintext_api_key.encode("utf-8")).hexdigest()[:16]
+    return f"{USER_BOUND_LOCK_PREFIX}{digest}"
 
 
 async def get_user_bound_key_for_task(db: AsyncSession, user_id: int) -> str | None:
@@ -92,17 +123,39 @@ async def get_user_bound_key_for_chat(db: AsyncSession, user_id: int) -> str | N
 
 async def acquire_task_llm_key(
     redis, db: AsyncSession, user_id: int
-) -> tuple[bool, int | None, str]:
+) -> KeyLease:
     """
-    自动写稿任务取 Key：优先用户绑定 Key（不占系统池锁）；否则系统池抢占一把锁。
-    返回 (use_system_pool, system_key_id_or_none, plaintext_api_key)。
+    自动写稿任务取 Key：优先用户绑定 Key，否则系统池。**两者都加 Redis 互斥锁**，
+    避免同一 key 被多个任务并发调用 → 上游 429 / RateLimit。
+
+    抢锁失败时抛 NoKeyAvailableError，由 Celery retry 60s 后重试（自动排队）。
+    若管理员未配置任何 key（且用户也没绑定）→ NoKeyConfiguredError，直接失败。
     """
     bound = await get_user_bound_key_for_task(db, user_id)
     if bound:
-        logger.info("Task uses user-bound LLM key user_id=%s", user_id)
-        return False, None, bound
+        lock_key = _user_bound_lock_key(bound)
+        acquired = await redis.set(lock_key, str(user_id), nx=True, ex=LOCK_TTL)
+        if not acquired:
+            raise NoKeyAvailableError(
+                "您绑定的 API Key 当前正被另一个任务使用，已为此任务自动排队"
+            )
+        logger.info(
+            "Task uses user-bound LLM key | user_id=%s | lock=%s | key=%s...%s",
+            user_id, lock_key, bound[:8], bound[-4:],
+        )
+        return KeyLease(
+            api_key=bound,
+            lock_key=lock_key,
+            system_key_id=None,
+            is_user_bound=True,
+        )
     key_id, api_key = await acquire_any_key(redis, db)
-    return True, key_id, api_key
+    return KeyLease(
+        api_key=api_key,
+        lock_key=f"{LOCK_PREFIX}{key_id}",
+        system_key_id=key_id,
+        is_user_bound=False,
+    )
 
 
 async def acquire_any_key(redis, db: AsyncSession) -> tuple[int, str]:
@@ -165,19 +218,48 @@ async def get_key_for_chat(db: AsyncSession, user_id: int | None = None) -> str 
     return key
 
 
-async def release_key(redis, key_id: int):
-    """释放 key 锁。"""
+async def release_lease(redis, lease: KeyLease | None) -> None:
+    """释放租约锁；幂等。"""
+    if lease is None:
+        return
+    try:
+        await redis.delete(lease.lock_key)
+        logger.info(
+            "Released key lock | lock=%s | system_key_id=%s | user_bound=%s",
+            lease.lock_key, lease.system_key_id, lease.is_user_bound,
+        )
+    except Exception:
+        logger.exception("Failed to release key lock %s", lease.lock_key)
+
+
+async def lease_heartbeat(redis, lease: KeyLease) -> None:
+    """定期续期租约锁，防止任务运行中锁过期。"""
+    try:
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            try:
+                await redis.expire(lease.lock_key, LOCK_TTL)
+                logger.debug("Heartbeat refreshed lock %s", lease.lock_key)
+            except Exception:
+                logger.exception("Heartbeat error for %s", lease.lock_key)
+    except asyncio.CancelledError:
+        pass
+
+
+# ── 兼容旧调用位（如未来有遗留代码引用，保持可运行） ───────────────────────
+async def release_key(redis, key_id: int) -> None:
+    """已废弃：保留以兼容旧调用；新代码请使用 release_lease(redis, lease)。"""
     await redis.delete(f"{LOCK_PREFIX}{key_id}")
-    logger.info("Released key db_id=%s", key_id)
+    logger.info("Released key (legacy) db_id=%s", key_id)
 
 
-async def key_heartbeat(redis, key_id: int):
-    """定期续期 key 锁，防止任务运行中锁过期。"""
+async def key_heartbeat(redis, key_id: int) -> None:
+    """已废弃：保留以兼容旧调用；新代码请使用 lease_heartbeat(redis, lease)。"""
     lock_key = f"{LOCK_PREFIX}{key_id}"
     try:
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             await redis.expire(lock_key, LOCK_TTL)
-            logger.debug("Heartbeat refreshed lock for key db_id=%s", key_id)
+            logger.debug("Heartbeat (legacy) refreshed lock for key db_id=%s", key_id)
     except asyncio.CancelledError:
         pass

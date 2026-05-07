@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, delete as sa_delete
 from pydantic import BaseModel, ConfigDict
 
 from app.database import AsyncSessionLocal, get_db
@@ -30,6 +30,8 @@ from app.utils.intent_detection import (
 from app.utils.word_count import (
     detect_lazy_response,
 )
+
+from app.utils.async_persist import spawn_persist_task, best_effort_wait
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
@@ -434,6 +436,32 @@ async def update_session(
     return {"id": session.id, "title": session.title}
 
 
+@router.delete("/sessions/empty")
+async def cleanup_empty_sessions(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """批量删除当前用户名下所有空会话（没有任何消息的会话）。"""
+    msg_count_subq = (
+        select(func.count(ChatMessage.id))
+        .where(ChatMessage.session_id == ChatSession.id)
+        .correlate(ChatSession)
+        .scalar_subquery()
+    )
+    target_ids = (
+        await db.execute(
+            select(ChatSession.id)
+            .where(ChatSession.user_id == current_user.id)
+            .where(msg_count_subq == 0)
+        )
+    ).scalars().all()
+    if not target_ids:
+        return {"deleted_count": 0, "deleted_ids": []}
+    await db.execute(sa_delete(ChatSession).where(ChatSession.id.in_(target_ids)))
+    await db.commit()
+    return {"deleted_count": len(target_ids), "deleted_ids": list(target_ids)}
+
+
 @router.delete("/sessions/{session_id}")
 async def delete_session(
     session_id: int,
@@ -804,6 +832,9 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
     accumulated = ""
     max_segments = max(1, settings.LLM_CHAT_MAX_SEGMENTS)
     stop_stream = False
+    # 出错时仍要把信息落库，避免用户切回看到空对话；与前端 reconcileChatMessages 的展示对齐。
+    stream_error_msg: str | None = None
+    client_disconnected = False
 
     # SSE 心跳：防止长时间无数据导致连接超时
     last_heartbeat = time.time()
@@ -909,23 +940,26 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                     session_id,
                 )
 
-            for seg_idx in range(max_segments):
+            # 审稿专用：丢掉所有历史（包括"补充到 X 字"等创作语境），只发一条 user 含 check_prompt，
+            # 否则模型容易被历史污染，回头继续写新故事而不是审阅。
+            is_check_branch = bool(user_intent and user_intent.is_check_request and article_to_check)
+            check_max_segments = 1 if is_check_branch else max_segments
+
+            for seg_idx in range(check_max_segments):
                 if stop_stream:
                     break
 
                 # 构建消息：第一轮用原始消息，后续轮次添加续写提示
                 if seg_idx == 0 and retry_count == 0:
-                    # 如果是检查请求，需要将文章内容添加到消息中
-                    if user_intent and user_intent.is_check_request and article_to_check:
-                        # 构建检查提示
+                    if is_check_branch:
                         from app.utils.intent_detection import generate_check_prompt
                         check_prompt = generate_check_prompt(article_to_check)
-
-                        # 替换用户的原始消息为检查提示
-                        msgs = list(base_messages[:-1]) + [
-                            {"role": "user", "content": check_prompt}
-                        ]
-                        logger.info("📝 Check request | article_len=%d", len(article_to_check))
+                        # 不带任何历史；审稿是独立任务
+                        msgs = [{"role": "user", "content": check_prompt}]
+                        logger.info(
+                            "📝 Check request | article_len=%d | history dropped | session=%s",
+                            len(article_to_check), session_id,
+                        )
                     else:
                         msgs = base_messages
                         logger.info("📤 Initial request | session=%s | seg=%d", session_id, seg_idx)
@@ -979,6 +1013,7 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                 ):
                     if await request.is_disconnected():
                         stop_stream = True
+                        client_disconnected = True
                         logger.warning(
                             "chat stream client disconnect session=%s seg=%s chunks=%s chars=%s",
                             session_id,
@@ -1023,14 +1058,18 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                 if stop_stream:
                     break
 
-                # 使用新的智能判断逻辑
-                should_continue, reason = should_continue_for_word_count(
-                    accumulated_text=accumulated,
-                    required_words=user_intent.word_count_requirement if user_intent else None,
-                    finish_reason=round_finish,
-                    segment_index=seg_idx,
-                    max_segments=max_segments,
-                )
+                # 审稿分支：拿到一段 Markdown 报告即停，永远不要再续写
+                if is_check_branch:
+                    should_continue = False
+                    reason = "check request: single-shot, no continuation"
+                else:
+                    should_continue, reason = should_continue_for_word_count(
+                        accumulated_text=accumulated,
+                        required_words=user_intent.word_count_requirement if user_intent else None,
+                        finish_reason=round_finish,
+                        segment_index=seg_idx,
+                        max_segments=max_segments,
+                    )
 
                 if reason:
                     logger.info(
@@ -1045,7 +1084,12 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                     break
 
             # 检查是否偷懒（只在第一轮检查，避免无限重试）
-            if retry_count == 0 and detect_lazy_response(accumulated, user_request):
+            # 审稿分支：报告本身偏短且经常会带"我会"等确认词，会被误判为偷懒；这里跳过。
+            if (
+                not is_check_branch
+                and retry_count == 0
+                and detect_lazy_response(accumulated, user_request)
+            ):
                 retry_count += 1
                 continue  # 重试
             else:
@@ -1079,7 +1123,8 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
         raise
     except Exception as exc:
         logger.exception("Chat stream error for session %s", session_id)
-        payload = json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False)
+        stream_error_msg = str(exc) or exc.__class__.__name__
+        payload = json.dumps({"type": "error", "error": stream_error_msg}, ensure_ascii=False)
         yield f"event: error\ndata: {payload}\n\n"
     finally:
         # 与 accumulated 对齐：异常或中途断开时可能未执行 accumulated +=，但仍需落库已产出的片段，
@@ -1087,23 +1132,34 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
         content = "".join(full_response)
         if not content and accumulated:
             content = accumulated
+        # 错误场景：即使一个 token 都没收到，也要落一条助手消息，否则用户切走再切回会看不到任何反馈。
+        # 与前端 reconcileChatMessages 的展示对齐：有内容则尾部追加错误说明；无内容则单独写一句失败提示。
+        if stream_error_msg and not client_disconnected:
+            tail = f"\n\n—\n（未能完整保存：{stream_error_msg}）"
+            if content.strip():
+                content = content.rstrip() + tail
+            else:
+                content = f"请求失败：{stream_error_msg}\n\n请重试，或检查 API Key / 网络连接。"
         logger.info(
-            "chat stream finally session=%s stop_stream=%s chunks=%s stream_chars=%s accum_len=%s persist_len=%s",
+            "chat stream finally session=%s stop_stream=%s err=%s chunks=%s stream_chars=%s accum_len=%s persist_len=%s",
             session_id,
             stop_stream,
+            bool(stream_error_msg),
             stream_token_events,
             stream_chars,
             len(accumulated),
             len(content),
         )
         if content:
-            try:
-                await _persist_assistant_message(
+            # Cancel-safe persistence: detach into an independent task so the DB write
+            # survives starlette cancelling this generator on client disconnect.
+            persist_task = spawn_persist_task(
+                _persist_assistant_message(
                     session_id,
                     content,
                     used_model,
                     tokens_in,
                     tokens_out,
                 )
-            except Exception:
-                logger.exception("Failed to persist assistant message session=%s", session_id)
+            )
+            await best_effort_wait(persist_task, timeout=5.0, label=f"chat-persist session={session_id}")

@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import random
 from datetime import datetime, timezone, timedelta
 
 from app.celery_app import celery_app
@@ -9,6 +10,11 @@ logger = logging.getLogger(__name__)
 
 # 任务超过此时长仍未完成 → 视为卡死，标记失败
 _MAX_TASK_AGE_HOURS = 16
+
+# Key 抢锁失败时的指数退避（秒）：第 N 次失败 → min(KEY_RETRY_BASE * N, KEY_RETRY_CAP) + jitter
+# 设计目标：用户绑 1 把 key 提多个任务时，前一任务释放锁后下一个最多等约 KEY_RETRY_CAP 秒就接上。
+_KEY_RETRY_BASE = 8
+_KEY_RETRY_CAP = 25
 
 
 def _run_async(coro):
@@ -50,10 +56,12 @@ def run_story(self, task_id: int, user_id: int = None):
         _mark_task_failed(task_id, "未配置可用的 API Key：请在个人设置中绑定 LLM Key，或由管理员配置系统 Key 池")
         return
     except NoKeyAvailableError:
-        # Key 都在用，正常排队等待（前端列表仍显示 queued，用 warning_msg 说明原因）
-        logger.info("Task %s waiting for free key — retry in 60s", task_id)
+        # Key 都在用，正常排队等待。退避策略：从 8s 起步、上限 25s + 抖动，避免雷鸣群效应。
+        attempt = self.request.retries + 1
+        countdown = min(_KEY_RETRY_BASE * attempt, _KEY_RETRY_CAP) + random.randint(0, 3)
+        logger.info("Task %s waiting for free key — retry in %ds (attempt=%d)", task_id, countdown, attempt)
         _set_task_key_queue_waiting(task_id)
-        raise self.retry(countdown=60)
+        raise self.retry(countdown=countdown)
     except Exception as exc:
         wait = min(30 * (self.request.retries + 1), 300)  # 最长等 5 分钟
         logger.warning(

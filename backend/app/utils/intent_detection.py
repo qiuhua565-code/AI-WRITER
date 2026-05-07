@@ -99,7 +99,11 @@ def detect_intent_by_keywords(user_message: str) -> UserIntent:
     """
     纯关键词规则意图识别，零延迟，覆盖最常用场景。
 
-    优先级：续写 > 检查 > 扩写 > 修改 > 完整输出 > 默认生成
+    优先级：续写 > 检查（纯审阅）> 扩写 > 修改 > 完整输出 > 默认生成
+
+    降级保护：当一条消息**同时**包含审阅词和创作类词（续写/扩写/修改/全文输出），
+    认为是复合意图，跳过审阅强制分支，按对应创作分支或默认对话处理；这样既不会
+    把「检查并续写」误判成纯审阅，也不会把「审阅完帮我改改」错路由到强制单段输出。
     """
     text = (user_message or "").strip()
 
@@ -115,27 +119,39 @@ def detect_intent_by_keywords(user_message: str) -> UserIntent:
             target_section=None,
         )
 
-    # 2. 检查/审阅
+    # 2. 检查/审阅 —— 只接受「纯审阅」用户消息
     if any(k in text for k in _CHECK_KW):
-        return UserIntent(
-            word_count_requirement=None,
-            is_full_output=False,
-            is_continue_request=False,
-            is_check_request=True,
-            action="check",
-            summary="检查文章质量",
-            target_section=_detect_target_section(text),
+        has_other_writing_intent = (
+            any(k in text for k in _EXPAND_KW)
+            or any(k in text for k in _REVISE_KW)
+            or any(k in text for k in _FULL_OUTPUT_KW)
+        )
+        if not has_other_writing_intent:
+            return UserIntent(
+                word_count_requirement=None,
+                is_full_output=False,
+                is_continue_request=False,
+                is_check_request=True,
+                action="check",
+                summary="检查文章质量",
+                target_section=_detect_target_section(text),
+            )
+        # 复合意图：让下方创作分支接管，is_check_request 不再置 True，
+        # 避免误触发「丢弃历史 + 单段输出 + 禁止续写」的强制审阅模板。
+        logger.info(
+            "Intent | check + writing keywords coexist → fall through to writing branch | text=%r",
+            text[:120],
         )
 
     # 3. 后续：提取字数 & 目标章节（供下面各分支共用）
     word_count = _detect_word_count(text)
     target = _detect_target_section(text)
 
-    # 4. 扩写
+    # 4. 扩写：尊重用户字数；用户没说就不强制 18000 字
     if any(k in text for k in _EXPAND_KW):
         return UserIntent(
-            word_count_requirement=word_count or 18000,
-            is_full_output=True,
+            word_count_requirement=word_count,
+            is_full_output=bool(word_count) or any(k in text for k in _FULL_OUTPUT_KW),
             is_continue_request=False,
             is_check_request=False,
             action="expand",
@@ -155,10 +171,10 @@ def detect_intent_by_keywords(user_message: str) -> UserIntent:
             target_section=target,
         )
 
-    # 6. 完整输出
+    # 6. 完整输出：用户明说"全文输出"才强制；字数也尊重用户输入
     if any(k in text for k in _FULL_OUTPUT_KW):
         return UserIntent(
-            word_count_requirement=word_count or 18000,
+            word_count_requirement=word_count,
             is_full_output=True,
             is_continue_request=False,
             is_check_request=False,
@@ -167,10 +183,11 @@ def detect_intent_by_keywords(user_message: str) -> UserIntent:
             target_section=target,
         )
 
-    # 7. 默认：生成新内容
+    # 7. 默认：标准对话行为 —— 用户说什么 LLM 写什么，模型自己说写完了就停
+    # 不再默认强制 18000 字 / 自动续写，避免出现「让写引言却直接写全文」等问题
     return UserIntent(
-        word_count_requirement=word_count or 18000,
-        is_full_output=True,
+        word_count_requirement=word_count,  # 用户没明确字数 → None，不会触发自动续写
+        is_full_output=False,
         is_continue_request=False,
         is_check_request=False,
         action="generate",
@@ -530,10 +547,25 @@ def generate_check_prompt(article_content: str) -> str:
     """
     current_words = count_words(article_content)
 
-    return f"""请对以下文章进行全面检查，并给出详细的检查报告：
+    return f"""【任务说明】你现在的角色是「审稿编辑」，**唯一任务**是审阅下方这篇已经写好的文章并输出 Markdown 格式的检查报告。
 
-【文章内容】
+【绝对禁止】
+- ❌ 不要重写或续写文章；不要输出新的章节、新的情节、新的对白
+- ❌ 不要先把故事补完再来检查；用户**没有**要求扩写
+- ❌ 不要回复「我先完成全文写作任务」「让我把故事写完整」「补充到 X 字」之类的话
+- ❌ 不要把整篇文章原样复述出来
+
+【唯一允许的输出】
+- ✅ 直接输出下方「输出格式」中的 Markdown 报告
+- ✅ 引用原文时只能引用 1-2 句关键短句，不要整段复制
+- ✅ 如果你认为故事确有内容不足之处，写在「## 总结」一节的「修改建议」里用一段文字描述方向即可，**绝不要直接动笔补写**
+
+---
+
+【待审阅文章】
 {article_content}
+
+---
 
 【检查项目】
 请逐项检查以下内容，并给出具体的问题位置和修改建议：

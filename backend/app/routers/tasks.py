@@ -30,6 +30,8 @@ from app.schemas.task import (
 )
 from app.utils.deps import get_current_user
 from app.utils.task_control import set_task_control, clear_task_control
+from app.utils.async_persist import spawn_persist_task, best_effort_wait
+from app.database import AsyncSessionLocal
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
 
@@ -385,21 +387,50 @@ async def review_chat(
     ]
 
     return StreamingResponse(
-        _review_chat_generator(request, db, task_id, current_user.id, api_key, messages, settings.LLM_DEFAULT_MODEL),
+        _review_chat_generator(request, task_id, current_user.id, api_key, messages, settings.LLM_DEFAULT_MODEL),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-async def _review_chat_generator(request: Request, db: AsyncSession, task_id: int, user_id: int, api_key: str, messages: list, model: str):
-    from app.services.llm import llm_client
+async def _persist_review_chat(task_id: int, content: str, model: str) -> None:
+    """Persist a review-chat assistant message in its own DB session.
+
+    Must use AsyncSessionLocal (not the request-scoped session) because this is
+    typically run as a fire-and-forget task after the request handler has returned.
+    """
     from datetime import datetime, timezone
 
-    full_response = []
+    async with AsyncSessionLocal() as db:
+        msg = Message(
+            task_id=task_id,
+            role="assistant",
+            content=content,
+            kind="review_chat",
+            model=model,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(msg)
+        await db.commit()
+        logger.info(
+            "review-chat persist ok task=%s content_len=%s model=%s",
+            task_id,
+            len(content),
+            model,
+        )
+
+
+async def _review_chat_generator(request: Request, task_id: int, user_id: int, api_key: str, messages: list, model: str):
+    from app.services.llm import llm_client
+
+    full_response: list[str] = []
+    stream_error_msg: str | None = None
+    client_disconnected = False
     try:
         yield ": connected\n\n"
         async for chunk in llm_client.stream(api_key=api_key, messages=messages, model=model, max_tokens=2000, temperature=0.75):
             if await request.is_disconnected():
+                client_disconnected = True
                 break
             if chunk.content:
                 full_response.append(chunk.content)
@@ -408,22 +439,27 @@ async def _review_chat_generator(request: Request, db: AsyncSession, task_id: in
             if chunk.finish_reason:
                 payload = json.dumps({"type": "done"}, ensure_ascii=False)
                 yield f"event: done\ndata: {payload}\n\n"
+    except asyncio.CancelledError:
+        # Client disconnect: starlette cancelled this generator. Mark and re-raise
+        # so the cleanup in `finally` still runs (Python guarantees finally on
+        # CancelledError) and we can safely persist the partial content.
+        client_disconnected = True
+        raise
     except Exception as exc:
         logger.exception("review-chat error task=%s", task_id)
-        payload = json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False)
+        stream_error_msg = str(exc) or exc.__class__.__name__
+        payload = json.dumps({"type": "error", "error": stream_error_msg}, ensure_ascii=False)
         yield f"event: error\ndata: {payload}\n\n"
     finally:
-        if full_response:
-            msg = Message(
-                task_id=task_id,
-                role="assistant",
-                content="".join(full_response),
-                kind="review_chat",
-                model=model,
-                created_at=datetime.now(timezone.utc),
-            )
-            db.add(msg)
-            await db.commit()
+        content = "".join(full_response)
+        # Append a discreet error tail only when the failure was real and the
+        # client is still here to read it; on user-initiated abort we keep the
+        # partial as-is so the next reload shows clean text.
+        if stream_error_msg and not client_disconnected and content.strip():
+            content = content.rstrip() + f"\n\n—\n（未能完整保存：{stream_error_msg}）"
+        if content:
+            persist_task = spawn_persist_task(_persist_review_chat(task_id, content, model))
+            await best_effort_wait(persist_task, timeout=5.0, label=f"review-chat-persist task={task_id}")
 
 
 _ARTICLE_CHECK_BRIEF = """你是资深网文与新媒体故事审校。请通读用户给出的【整篇文章】（虚构创作），按下列维度逐项检查，输出 Markdown 报告（## 小节 + 要点列表）。某项若无问题可写「未见明显问题」。

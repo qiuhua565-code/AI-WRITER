@@ -30,6 +30,7 @@ import {
   GitCompare,
   ListChecks,
   GripVertical,
+  Square,
 } from "lucide-react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
@@ -215,6 +216,8 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
   const [chatInput, setChatInput] = useState("")
   const [chatSending, setChatSending] = useState(false)
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
+  /** 中断当前正在进行的 review-chat 流；点击「停止」按钮时调用 abort()。 */
+  const reviewChatAbortRef = useRef<AbortController | null>(null)
 
   const [articleCheckOpen, setArticleCheckOpen] = useState(false)
   const [articleCheckMinimized, setArticleCheckMinimized] = useState(false)
@@ -381,6 +384,14 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
       ])
     })
 
+    // 替换当前 abort 控制器：上一次若仍在跑，先 abort 让它收尾，再新建本次的。
+    reviewChatAbortRef.current?.abort()
+    const controller = new AbortController()
+    reviewChatAbortRef.current = controller
+
+    let aborted = false
+    let hadError = false
+
     try {
       const res = await fetch(`/api/v1/tasks/${task.id}/review-chat`, {
         method: "POST",
@@ -394,6 +405,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
           action,
           segment_type: activeSegment || undefined,
         }),
+        signal: controller.signal,
       })
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
 
@@ -401,42 +413,81 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
       const decoder = new TextDecoder()
       let buf = ""
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split("\n")
-        buf = lines.pop() ?? ""
+      // 当用户点击停止：主动 cancel 读取流，触发 reader.read() 抛 AbortError。
+      const onAbort = () => { reader.cancel().catch(() => {}) }
+      controller.signal.addEventListener("abort", onAbort, { once: true })
 
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue
-          const raw = line.slice(5).trim()
-          if (!raw) continue
-          try {
-            const evt = JSON.parse(raw)
-            if (evt.type === "token" && evt.content) {
-              flushSync(() => {
+      try {
+        while (true) {
+          if (controller.signal.aborted) break
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split("\n")
+          buf = lines.pop() ?? ""
+
+          for (const line of lines) {
+            if (!line.startsWith("data:")) continue
+            const raw = line.slice(5).trim()
+            if (!raw) continue
+            try {
+              const evt = JSON.parse(raw)
+              if (evt.type === "token" && evt.content) {
+                flushSync(() => {
+                  setChatMessages(prev => prev.map((m, i) =>
+                    i === prev.length - 1 ? { ...m, content: m.content + evt.content } : m
+                  ))
+                })
+              } else if (evt.type === "done") {
                 setChatMessages(prev => prev.map((m, i) =>
-                  i === prev.length - 1 ? { ...m, content: m.content + evt.content } : m
+                  i === prev.length - 1 ? { ...m, streaming: false } : m
                 ))
-              })
-            } else if (evt.type === "done") {
-              setChatMessages(prev => prev.map((m, i) =>
-                i === prev.length - 1 ? { ...m, streaming: false } : m
-              ))
-            }
-          } catch {}
+              }
+            } catch {}
+          }
         }
+      } finally {
+        controller.signal.removeEventListener("abort", onAbort)
       }
-    } catch {
-      setChatMessages(prev => prev.map((m, i) =>
-        i === prev.length - 1 ? { ...m, content: "请求失败，请重试。", streaming: false } : m
-      ))
+    } catch (e: unknown) {
+      // AbortError（用户主动停止）vs 真错误：前者保留已有内容并加尾标签，后者改文案为请求失败。
+      const isAbort =
+        controller.signal.aborted ||
+        (e instanceof DOMException && e.name === "AbortError") ||
+        (e instanceof Error && (e.name === "AbortError" || /aborted/i.test(e.message)))
+      if (isAbort) {
+        aborted = true
+      } else {
+        hadError = true
+      }
     } finally {
+      if (reviewChatAbortRef.current === controller) {
+        reviewChatAbortRef.current = null
+      }
       setChatSending(false)
-      setChatMessages(prev => prev.map((m, i) =>
-        i === prev.length - 1 ? { ...m, streaming: false } : m
-      ))
+      setChatMessages(prev => prev.map((m, i) => {
+        if (i !== prev.length - 1) return m
+        const partial = m.content
+        if (aborted) {
+          return {
+            ...m,
+            streaming: false,
+            content: partial.trim()
+              ? `${partial.trimEnd()}\n\n—\n（已停止生成）`
+              : "（已停止生成）",
+          }
+        }
+        if (hadError) {
+          return {
+            ...m,
+            streaming: false,
+            content: partial.trim()
+              ? `${partial.trimEnd()}\n\n—\n（请求失败，请重试）`
+              : "请求失败，请重试。",
+          }
+        }
+        return { ...m, streaming: false }
+      }))
     }
   }, [task.id, activeSegment])
 
@@ -1322,17 +1373,28 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                       rows={2}
                       disabled={chatSending}
                     />
-                    <Button
-                      size="icon"
-                      className="mb-0.5 h-11 w-11 shrink-0 rounded-xl bg-slate-900 hover:bg-slate-800"
-                      disabled={!chatInput.trim() || chatSending}
-                      onClick={() => {
-                        sendReviewChat(chatInput)
-                        setChatInput("")
-                      }}
-                    >
-                      <Send className="h-4 w-4" />
-                    </Button>
+                    {chatSending ? (
+                      <Button
+                        size="icon"
+                        className="mb-0.5 h-11 w-11 shrink-0 rounded-xl bg-rose-500 text-white hover:bg-rose-600"
+                        title="停止生成"
+                        onClick={() => reviewChatAbortRef.current?.abort()}
+                      >
+                        <Square className="h-4 w-4" />
+                      </Button>
+                    ) : (
+                      <Button
+                        size="icon"
+                        className="mb-0.5 h-11 w-11 shrink-0 rounded-xl bg-slate-900 hover:bg-slate-800"
+                        disabled={!chatInput.trim()}
+                        onClick={() => {
+                          sendReviewChat(chatInput)
+                          setChatInput("")
+                        }}
+                      >
+                        <Send className="h-4 w-4" />
+                      </Button>
+                    )}
                   </div>
                 </div>
                 <p className="mt-2 text-center text-[10px] text-slate-400">

@@ -15,7 +15,7 @@ from app.models.task_event import TaskEvent
 from app.prompts import render_prompt
 from app.redis_client import get_redis
 from app.services.llm import LLMClient, llm_client
-from app.services.key_pool import acquire_task_llm_key, release_key, key_heartbeat
+from app.services.key_pool import acquire_task_llm_key, release_lease, lease_heartbeat
 from app.utils.task_control import get_task_control
 
 logger = logging.getLogger(__name__)
@@ -70,15 +70,25 @@ class EmotionStoryOrchestrator:
                 logger.error("Task %s not found", self.task_id)
                 return
 
-            uses_system_pool, key_id, api_key = await acquire_task_llm_key(redis, db, task.user_id)
-            heartbeat = asyncio.create_task(key_heartbeat(redis, key_id)) if uses_system_pool and key_id is not None else None
+            lease = await acquire_task_llm_key(redis, db, task.user_id)
+            api_key = lease.api_key
+            heartbeat = asyncio.create_task(lease_heartbeat(redis, lease))
             try:
                 await self._run_pipeline(task, db, redis, api_key)
             except Exception as exc:
-                # 网络/超时类错误：不标 failed，让 Celery 层 retry
+                # 网络/超时/限流类错误：不标 failed，让 Celery 层 retry（受 _MAX_TASK_AGE_HOURS 兜底）
                 import httpx
-                from anthropic import APITimeoutError, APIConnectionError
-                is_retryable = isinstance(exc, (
+                from anthropic import (
+                    APITimeoutError,
+                    APIConnectionError,
+                    RateLimitError,
+                    APIStatusError,
+                )
+                is_rate_limited = isinstance(exc, RateLimitError) or (
+                    isinstance(exc, APIStatusError)
+                    and getattr(exc, "status_code", None) in (429, 502, 503, 504)
+                )
+                is_retryable = is_rate_limited or isinstance(exc, (
                     httpx.ConnectTimeout,
                     httpx.ReadTimeout,
                     httpx.ConnectError,
@@ -91,7 +101,17 @@ class EmotionStoryOrchestrator:
                     TimeoutError,
                 ))
                 if is_retryable:
-                    logger.warning("Task %s retryable network error: %s", self.task_id, exc)
+                    logger.warning(
+                        "Task %s retryable error (rate_limited=%s): %s",
+                        self.task_id, is_rate_limited, exc,
+                    )
+                    if is_rate_limited:
+                        try:
+                            from app.utils.task_messages import KEY_QUEUE_WAITING_MSG
+                            task.warning_msg = KEY_QUEUE_WAITING_MSG
+                            await db.commit()
+                        except Exception:
+                            logger.exception("Failed to set warning_msg for task %s", self.task_id)
                     raise  # 让外层 Celery retry 处理
                 # 真正的业务错误才标 failed
                 logger.exception("Task %s fatal error", self.task_id)
@@ -100,10 +120,12 @@ class EmotionStoryOrchestrator:
                 await db.commit()
                 await self._push_stream(redis, {"type": "task_failed", "error": str(exc)})
             finally:
-                if heartbeat:
-                    heartbeat.cancel()
-                if uses_system_pool and key_id is not None:
-                    await release_key(redis, key_id)
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except (asyncio.CancelledError, Exception):
+                    pass
+                await release_lease(redis, lease)
 
     async def _run_pipeline(self, task: Task, db: AsyncSession, redis, api_key: str):
         if task.status in ("cancelled", "failed"):

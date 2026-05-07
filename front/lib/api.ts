@@ -374,6 +374,13 @@ export const chatApi = {
   deleteSession: (id: number) =>
     request<{ message: string }>(`/chat/sessions/${id}`, { method: 'DELETE' }),
 
+  /** 一键清理当前用户名下没有任何消息的空会话；返回被删除的 id 列表。 */
+  cleanupEmptySessions: () =>
+    request<{ deleted_count: number; deleted_ids: number[] }>(
+      '/chat/sessions/empty',
+      { method: 'DELETE' }
+    ),
+
   getMessages: (sessionId: number) =>
     request<ChatMessage[]>(`/chat/sessions/${sessionId}/messages`),
 
@@ -387,7 +394,7 @@ export const chatApi = {
     }),
 
   /** Returns raw Response so caller can read the SSE stream manually. */
-  regenerateStream: (sessionId: number, assistantMessageId: number, model?: string) =>
+  regenerateStream: (sessionId: number, assistantMessageId: number, model?: string, signal?: AbortSignal) =>
     fetch(`${BASE}/chat/sessions/${sessionId}/regenerate`, {
       method: 'POST',
       headers: {
@@ -399,13 +406,15 @@ export const chatApi = {
         assistant_message_id: assistantMessageId,
         model: model ?? null,
       }),
+      signal,
     }),
   streamMessage: (
     sessionId: number,
     content: string,
     model?: string,
     attachments?: ChatAttachmentPart[],
-    context?: { type: string; content: string }
+    context?: { type: string; content: string },
+    signal?: AbortSignal
   ) =>
     fetch(`${BASE}/chat/sessions/${sessionId}/stream`, {
       method: 'POST',
@@ -429,5 +438,6 @@ export const chatApi = {
           : undefined,
         context: context ?? undefined,
       }),
+      signal,
     }),
 }

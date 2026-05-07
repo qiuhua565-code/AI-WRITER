@@ -41,6 +41,8 @@ import {
   GitCompare,
   ClipboardCheck,
   Loader2,
+  Eraser,
+  Square,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -53,6 +55,16 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import {
   Select,
   SelectContent,
@@ -226,14 +238,19 @@ function reconcileChatMessages(
   serverMsgs: ChatMessage[],
   streamedAssistant: string,
   optimisticAssistantId: number,
-  streamError: string | null
+  streamError: string | null,
+  aborted: boolean = false
 ): DisplayMessage[] {
-  const displayBody =
-    streamError && streamedAssistant.trim()
-      ? `${streamedAssistant.trim()}\n\n—\n（未能完整保存：${streamError}）`
-      : streamedAssistant
-  const streamText = displayBody.trim()
-  const streamLen = streamText.length
+  // displayBody 是最终给用户看的文本，包含中断/错误尾标签。
+  let displayBody = streamedAssistant
+  if (aborted) {
+    displayBody = streamedAssistant.trim()
+      ? `${streamedAssistant.trim()}\n\n—\n（已停止生成）`
+      : "（已停止生成）"
+  } else if (streamError && streamedAssistant.trim()) {
+    displayBody = `${streamedAssistant.trim()}\n\n—\n（未能完整保存：${streamError}）`
+  }
+  const streamLen = displayBody.trim().length
   const base = serverMsgs.map((m) => ({ ...m })) as DisplayMessage[]
   let targetIdx = base.findIndex(
     (m) => m.role === "assistant" && m.id === optimisticAssistantId
@@ -248,9 +265,14 @@ function reconcileChatMessages(
         : -1
   }
   const targetAsst = targetIdx >= 0 ? base[targetIdx] : undefined
-  const serverLen = (targetAsst?.content?.trim().length ?? 0)
+  const serverLen = targetAsst?.content?.trim().length ?? 0
 
-  if (streamLen > 0 && (!targetAsst || streamLen > serverLen + 15)) {
+  // 中断或错误场景：后端持久化是 fire-and-forget，可能此刻 server 还没有这条助手消息，
+  // 或保存的版本不带「（已停止生成）」尾标签。这两种场景都必须用前端 displayBody 兜底，
+  // 否则用户看到的就是空白 / 半截 —— 这是用户反馈的核心问题。
+  const forcePreferStream = aborted || !!streamError
+
+  if (streamLen > 0 && (!targetAsst || forcePreferStream || streamLen > serverLen + 15)) {
     if (targetAsst && targetIdx >= 0) {
       base[targetIdx] = {
         ...targetAsst,
@@ -270,7 +292,7 @@ function reconcileChatMessages(
     return base
   }
 
-  if (streamError && streamLen === 0) {
+  if ((streamError || aborted) && streamLen === 0) {
     const last = base[base.length - 1]
     const needsAssistantNote =
       !last || last.role !== "assistant" || !(last.content?.trim())
@@ -278,7 +300,7 @@ function reconcileChatMessages(
       base.push({
         id: optimisticAssistantId,
         role: "assistant",
-        content: `请求失败：${streamError}`,
+        content: aborted ? "（已停止生成）" : `请求失败：${streamError}`,
         model: null,
         created_at: new Date().toISOString(),
         streaming: false,
@@ -290,9 +312,20 @@ function reconcileChatMessages(
   return base
 }
 
+/** 用户主动中断流式对话时抛出，可被外层识别为「正常停止」而非真错误。 */
+class StreamAbortedByUser extends Error {
+  partialAssistantText: string
+  constructor(partial: string) {
+    super("已停止生成")
+    this.name = "StreamAbortedByUser"
+    this.partialAssistantText = partial
+  }
+}
+
 async function consumeChatSSE(
   res: Response,
-  onAccumulated: (text: string) => void
+  onAccumulated: (text: string) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   if (!res.ok || !res.body) {
     const t = await res.text().catch(() => "")
@@ -304,6 +337,17 @@ async function consumeChatSSE(
   const decoder = new TextDecoder()
   let buffer = ""
   let accumulated = ""
+  // 监听 AbortSignal，被取消时主动 cancel reader，让 fetch 立刻抛 AbortError
+  const onAbort = () => {
+    reader.cancel().catch(() => {})
+  }
+  if (signal) {
+    if (signal.aborted) {
+      reader.cancel().catch(() => {})
+      throw new StreamAbortedByUser(accumulated)
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+  }
   try {
     while (true) {
       const { done, value } = await reader.read()
@@ -338,12 +382,19 @@ async function consumeChatSSE(
     }
     return accumulated
   } catch (e: unknown) {
+    if (signal?.aborted) {
+      throw new StreamAbortedByUser(accumulated)
+    }
     if (e && typeof e === "object" && "partialAssistantText" in e) {
       throw e
     }
     throw Object.assign(e instanceof Error ? e : new Error(String(e)), {
       partialAssistantText: accumulated,
     })
+  } finally {
+    if (signal) {
+      signal.removeEventListener("abort", onAbort)
+    }
   }
 }
 
@@ -471,6 +522,120 @@ async function copyTextToClipboard(text: string): Promise<void> {
   }
 }
 
+/**
+ * 把渲染后的助手消息（粗体 / 标题 / 列表 / 引用 / 代码块等）以富文本形式复制，
+ * 同时附带 markdown 源码作为 plain 兜底，让 Word/邮件粘出对应格式，记事本/IDE 粘出原文。
+ *
+ * 实现：
+ * - 找到 [data-msg-id] 节点克隆，剥掉 React 内部属性、tooltip、复制/反馈按钮等噪音
+ * - 用 ClipboardItem 同时写 text/html + text/plain
+ * - 不支持 ClipboardItem 的浏览器：降级写 plain（与原行为一致）
+ */
+function buildHtmlFromMessageNode(node: HTMLElement): string {
+  const cloned = node.cloneNode(true) as HTMLElement
+  // 移除「思考过程」可折叠块（避免把分析内容也粘到 Word）
+  cloned.querySelectorAll("details, summary").forEach((el) => el.remove())
+  // 清理 React 内部 / 组件库残留属性，避免 Word 报错或乱嵌入数据
+  const attrBlacklistPrefix = ["data-radix", "data-state", "data-msg-id", "data-md-body"]
+  const treeWalk = (el: Element) => {
+    Array.from(el.attributes).forEach((a) => {
+      const n = a.name
+      if (n.startsWith("on") || attrBlacklistPrefix.some((p) => n.startsWith(p))) {
+        el.removeAttribute(n)
+      }
+    })
+    Array.from(el.children).forEach(treeWalk)
+  }
+  treeWalk(cloned)
+  // 包一层 body 让 Word 识别为 HTML 文档片段；保留基础排版样式（行距、字号）
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.85;color:#1f2937;">${cloned.innerHTML}</body></html>`
+}
+
+async function copyAssistantRich(messageId: number, fallbackMarkdown: string): Promise<void> {
+  if (typeof window === "undefined") return
+  const node = document.querySelector<HTMLElement>(`[data-msg-id="${messageId}"][data-md-body]`)
+  const plain = assistantPlainTextForCopy(fallbackMarkdown)
+
+  // 富文本路径：需要 ClipboardItem + clipboard.write
+  const canRich =
+    typeof window.ClipboardItem !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    !!navigator.clipboard &&
+    typeof navigator.clipboard.write === "function"
+
+  if (node && canRich) {
+    try {
+      const html = buildHtmlFromMessageNode(node)
+      const item = new window.ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+        "text/plain": new Blob([plain], { type: "text/plain" }),
+      })
+      await navigator.clipboard.write([item])
+      return
+    } catch {
+      /* 浏览器拒绝（HTTP 环境 / 权限）：降级 */
+    }
+  }
+  await copyTextToClipboard(plain)
+}
+
+function CodeBlockWithHeader({
+  language,
+  source,
+}: {
+  language: string
+  source: string
+}) {
+  const [copied, setCopied] = useState(false)
+  const onCopy = async () => {
+    try {
+      await copyTextToClipboard(source)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+  return (
+    <div className="not-prose my-3 overflow-hidden rounded-xl border border-slate-700/40 bg-[#282c34] text-[13px] shadow-sm">
+      <div className="flex items-center justify-between border-b border-slate-700/40 bg-slate-800/60 px-3 py-1.5">
+        <span className="font-mono text-[11px] uppercase tracking-wider text-slate-300/90">
+          {language}
+        </span>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-slate-300/90 transition hover:bg-slate-700/60 hover:text-white"
+          title="复制代码"
+        >
+          {copied ? (
+            <>
+              <Check className="h-3 w-3" /> 已复制
+            </>
+          ) : (
+            <>
+              <Copy className="h-3 w-3" /> 复制
+            </>
+          )}
+        </button>
+      </div>
+      <SyntaxHighlighter
+        style={oneDark as Record<string, React.CSSProperties>}
+        language={language}
+        PreTag="div"
+        customStyle={{
+          margin: 0,
+          padding: "12px 14px",
+          background: "transparent",
+          fontSize: "13px",
+        }}
+      >
+        {source}
+      </SyntaxHighlighter>
+    </div>
+  )
+}
+
 const chatMarkdownComponents = {
   pre({ children }: { children?: ReactNode }) {
     return <>{children}</>
@@ -487,14 +652,10 @@ const chatMarkdownComponents = {
     const isBlock = !!match
     if (isBlock) {
       return (
-        <SyntaxHighlighter
-          style={oneDark as Record<string, React.CSSProperties>}
+        <CodeBlockWithHeader
           language={match[1]}
-          PreTag="div"
-          className="!rounded-xl !text-[13px] !my-3 !shadow-sm"
-        >
-          {String(children).replace(/\n$/, "")}
-        </SyntaxHighlighter>
+          source={String(children).replace(/\n$/, "")}
+        />
       )
     }
     return (
@@ -508,9 +669,12 @@ const chatMarkdownComponents = {
 function MessageContent({
   content,
   streaming,
+  messageId,
 }: {
   content: string
   streaming?: boolean
+  /** 复制富文本时定位 DOM 节点的锚点 */
+  messageId?: number
 }) {
   const displaySource = useMemo(
     () => sanitizeAssistantDisplay(content, streaming),
@@ -525,13 +689,31 @@ function MessageContent({
 
   return (
     <div
-      className="prose prose-sm max-w-none break-words select-text text-[15px] leading-relaxed text-slate-800
-      prose-p:my-2 prose-headings:font-semibold prose-headings:my-3
-      prose-ul:my-2 prose-ol:my-2 prose-li:my-1
-      prose-code:text-rose-600 prose-code:bg-slate-100/90 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[13px]
-      prose-pre:my-3 prose-pre:p-0 prose-pre:bg-transparent
-      [&_blockquote]:border-l-4 [&_blockquote]:border-amber-400/50 [&_blockquote]:bg-amber-50/60 [&_blockquote]:rounded-r-lg [&_blockquote]:pl-4 [&_blockquote]:py-2
-      prose-strong:font-semibold prose-table:text-sm"
+      data-msg-id={messageId}
+      data-md-body
+      className="prose prose-sm max-w-none break-words select-text text-[15px] leading-[1.85] text-slate-800
+      prose-p:my-3 prose-p:leading-[1.85]
+      prose-headings:font-semibold prose-headings:tracking-tight prose-headings:text-slate-900
+      prose-h1:text-[20px] prose-h1:mt-6 prose-h1:mb-3 prose-h1:pb-2 prose-h1:border-b prose-h1:border-slate-200
+      prose-h2:text-[17px] prose-h2:mt-5 prose-h2:mb-2.5
+      prose-h3:text-[15px] prose-h3:mt-4 prose-h3:mb-2 prose-h3:text-slate-800
+      prose-h4:text-[14px] prose-h4:mt-3 prose-h4:mb-1.5
+      prose-ul:my-3 prose-ol:my-3 prose-li:my-1
+      [&_ul>li]:marker:text-amber-500/80 [&_ol>li]:marker:text-amber-600/90 [&_ol>li]:marker:font-semibold
+      [&_ul]:pl-5 [&_ol]:pl-5
+      prose-code:text-rose-600 prose-code:bg-slate-100/90 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[13px] prose-code:font-normal prose-code:before:content-none prose-code:after:content-none
+      prose-pre:my-0 prose-pre:p-0 prose-pre:bg-transparent
+      [&_blockquote]:not-italic [&_blockquote]:border-l-4 [&_blockquote]:border-amber-400/70 [&_blockquote]:bg-amber-50/70 [&_blockquote]:rounded-r-xl [&_blockquote]:px-4 [&_blockquote]:py-2.5 [&_blockquote]:my-3 [&_blockquote]:text-slate-700
+      [&_blockquote_p]:my-1 [&_blockquote_p:before]:content-none [&_blockquote_p:after]:content-none
+      prose-a:text-amber-700 prose-a:no-underline hover:prose-a:underline prose-a:underline-offset-2
+      prose-strong:font-semibold prose-strong:text-slate-900
+      prose-em:text-slate-700
+      prose-hr:my-5 prose-hr:border-slate-200
+      prose-table:text-[13px] prose-table:my-3 prose-table:border prose-table:border-slate-200 prose-table:rounded-lg prose-table:overflow-hidden
+      [&_thead]:bg-slate-50 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_th]:text-slate-700 [&_th]:border-b [&_th]:border-slate-200
+      [&_td]:px-3 [&_td]:py-2 [&_td]:border-b [&_td]:border-slate-100
+      [&_tbody_tr:nth-child(even)]:bg-slate-50/40
+      [&_img]:rounded-lg [&_img]:shadow-sm [&_img]:my-3"
     >
       {segments.map((seg, idx) =>
         seg.kind === "think" ? (
@@ -610,6 +792,16 @@ export default function ChatPage() {
     ChatAttachmentPart[]
   >([])
   const [fileDragOver, setFileDragOver] = useState(false)
+  const [cleaningEmpty, setCleaningEmpty] = useState(false)
+  /** 待确认删除的会话；非空时弹出确认对话框 */
+  const [sessionToDelete, setSessionToDelete] = useState<ChatSession | null>(null)
+  const [deletingSession, setDeletingSession] = useState(false)
+  /** 是否显示「清理空会话」确认对话框 */
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false)
+  /** 桌面侧栏宽度（px），可拖动调整；移动端不生效 */
+  const [sidebarWidth, setSidebarWidth] = useState(280)
+  const [resizingSidebar, setResizingSidebar] = useState(false)
+  const sidebarWidthRef = useRef(280)
 
   // ── 关联文章 ──────────────────────────────────────────────────────────────
   const [linkedTask, setLinkedTask] = useState<{ id: number; title: string; content: string } | null>(null)
@@ -634,6 +826,8 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sendingRef = useRef(false)
+  /** 当前流式请求的中止控制器，点击停止按钮时 abort()，后端 is_disconnected 自动停止 LLM。 */
+  const streamAbortRef = useRef<AbortController | null>(null)
   /** 实时追踪每个 session 正在进行的流式内容，切换 session 再切回时用于恢复显示。
    *  done=true 表示流已结束（含出错），内容保留供切回时展示；发新消息时会被覆盖。 */
   const liveStreamRef = useRef<Map<number, { content: string; msgId: number; done?: boolean }>>(new Map())
@@ -645,6 +839,7 @@ export default function ChatPage() {
         streamedAssistant: string
         optimisticAssistantId: number
         streamError: string | null
+        aborted?: boolean
       }
     >
   >(new Map())
@@ -666,6 +861,51 @@ export default function ChatPage() {
     if (saved && CHAT_MODEL_OPTIONS.some((m) => m.id === saved)) {
       setSelectedModel(saved)
     }
+  }, [])
+
+  // 加载侧栏宽度
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const saved = localStorage.getItem("chat-sidebar-width")
+    if (saved) {
+      const n = parseInt(saved, 10)
+      if (!Number.isNaN(n) && n >= 220 && n <= 480) {
+        setSidebarWidth(n)
+        sidebarWidthRef.current = n
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth
+  }, [sidebarWidth])
+
+  const startResizingSidebar = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = sidebarWidthRef.current
+    setResizingSidebar(true)
+    // 防止拖动时高亮文本/光标变形
+    const prevUserSelect = document.body.style.userSelect
+    const prevCursor = document.body.style.cursor
+    document.body.style.userSelect = "none"
+    document.body.style.cursor = "col-resize"
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.max(220, Math.min(480, startW + (ev.clientX - startX)))
+      setSidebarWidth(next)
+    }
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove)
+      document.removeEventListener("mouseup", onUp)
+      document.body.style.userSelect = prevUserSelect
+      document.body.style.cursor = prevCursor
+      setResizingSidebar(false)
+      try {
+        localStorage.setItem("chat-sidebar-width", String(sidebarWidthRef.current))
+      } catch {}
+    }
+    document.addEventListener("mousemove", onMove)
+    document.addEventListener("mouseup", onUp)
   }, [])
 
   useEffect(() => {
@@ -725,9 +965,9 @@ export default function ChatPage() {
       .then((rows) => {
         if (activeSessionRef.current?.id !== sid) return
 
-        // 1. 优先：该 session 正有流在跑，把当前流式内容合并进去
+        // 1. 该 session 仍在流式输出中（done=false）：把流式增量合并到末尾
         const live = liveStreamRef.current.get(sid)
-        if (live) {
+        if (live && !live.done) {
           const base = [...rows] as DisplayMessage[]
           const idx = base.findLastIndex((m) => m.role === "assistant")
           const streamingMsg: DisplayMessage = {
@@ -736,7 +976,7 @@ export default function ChatPage() {
             content: live.content,
             model: null,
             created_at: new Date().toISOString(),
-            streaming: !live.done,
+            streaming: true,
           }
           if (idx >= 0 && base[idx].id === live.msgId) {
             base[idx] = streamingMsg
@@ -747,7 +987,9 @@ export default function ChatPage() {
           return
         }
 
-        // 2. 流已结束但用户当时切走了，用 pending reconcile 合并
+        // 2. 流已结束（含中断）但用户切走过：合并 pending reconcile 信息或 liveStreamRef 残留。
+        //    后端 fire-and-forget 持久化生成的 DB id 与前端 optimisticAssistantId 不一致，
+        //    必须走 reconcileChatMessages 让它去重 + 应用「（已停止生成）」尾标签。
         const pending = pendingChatReconcileRef.current.get(sid)
         if (pending) {
           setMessages(
@@ -755,10 +997,29 @@ export default function ChatPage() {
               rows,
               pending.streamedAssistant,
               pending.optimisticAssistantId,
-              pending.streamError
+              pending.streamError,
+              pending.aborted ?? false
             )
           )
           pendingChatReconcileRef.current.delete(sid)
+        } else if (live && live.done) {
+          // 没有 pending 但 liveStreamRef 仍标记本会话上次中断/出错的最终内容，覆盖到 server 末条助手。
+          const base = [...rows] as DisplayMessage[]
+          const idx = base.findLastIndex((m) => m.role === "assistant")
+          const finalMsg: DisplayMessage = {
+            id: idx >= 0 ? base[idx].id : live.msgId,
+            role: "assistant",
+            content: live.content,
+            model: idx >= 0 ? base[idx].model : null,
+            created_at: idx >= 0 ? base[idx].created_at : new Date().toISOString(),
+            streaming: false,
+          }
+          if (idx >= 0) {
+            base[idx] = finalMsg
+          } else {
+            base.push(finalMsg)
+          }
+          setMessages(base)
         } else {
           setMessages(rows)
         }
@@ -808,6 +1069,12 @@ export default function ChatPage() {
 
       let streamedAssistant = ""
       let streamError: string | null = null
+      let aborted = false
+
+      // 新建中止控制器并暴露给 UI（停止按钮）
+      const controller = new AbortController()
+      streamAbortRef.current?.abort()
+      streamAbortRef.current = controller
 
       try {
         const res = await chatApi.streamMessage(
@@ -815,38 +1082,60 @@ export default function ChatPage() {
           content,
           modelForStream,
           attachments,
-          context
+          context,
+          controller.signal
         )
-        streamedAssistant = await consumeChatSSE(res, (acc) => {
-          // 始终更新 liveStreamRef，无论当前在哪个 session
-          liveStreamRef.current.set(session.id, { content: acc, msgId: assistantMsg.id })
-          setMessages((prev) => {
-            if (activeSessionRef.current?.id !== session.id) return prev
-            return prev.map((m) =>
-              m.id === assistantMsg.id ? { ...m, content: acc, streaming: true } : m
-            )
-          })
-        })
+        streamedAssistant = await consumeChatSSE(
+          res,
+          (acc) => {
+            liveStreamRef.current.set(session.id, { content: acc, msgId: assistantMsg.id })
+            setMessages((prev) => {
+              if (activeSessionRef.current?.id !== session.id) return prev
+              return prev.map((m) =>
+                m.id === assistantMsg.id ? { ...m, content: acc, streaming: true } : m
+              )
+            })
+          },
+          controller.signal
+        )
       } catch (e: unknown) {
-        streamError = e instanceof Error ? e.message : String(e)
-        const partial = streamErrorPartial(e)
-        if (partial) streamedAssistant = partial
-        // 出错时把已收到内容存入 liveStreamRef 并标记 done，
+        if (e instanceof StreamAbortedByUser) {
+          aborted = true
+          const partial = e.partialAssistantText || ""
+          if (partial) streamedAssistant = partial
+        } else {
+          streamError = e instanceof Error ? e.message : String(e)
+          const partial = streamErrorPartial(e)
+          if (partial) streamedAssistant = partial
+        }
+        // 出错或中断时把已收到内容存入 liveStreamRef 并标记 done，
         // 这样切走再切回仍能看到已生成的正文，不会变空
-        const errorDisplay = streamedAssistant.trim()
-          ? `${streamedAssistant.trim()}\n\n—\n（未能完整保存：${streamError}）`
-          : ""
-        if (errorDisplay) {
-          liveStreamRef.current.set(session.id, { content: errorDisplay, msgId: assistantMsg.id, done: true })
+        const tail = aborted
+          ? streamedAssistant.trim()
+            ? `${streamedAssistant.trim()}\n\n—\n（已停止生成）`
+            : "（已停止生成）"
+          : streamError && streamedAssistant.trim()
+            ? `${streamedAssistant.trim()}\n\n—\n（未能完整保存：${streamError}）`
+            : ""
+        if (tail) {
+          liveStreamRef.current.set(session.id, { content: tail, msgId: assistantMsg.id, done: true })
         }
       } finally {
-        // 正常完成才清除 liveStreamRef；出错时保留（done:true），下次发新消息时会被覆盖
-        if (!streamError) {
+        if (streamAbortRef.current === controller) {
+          streamAbortRef.current = null
+        }
+        // 正常完成才清 liveStreamRef；abort 或错误都保留（done:true），切回时仍能看到已生成内容
+        if (!streamError && !aborted) {
           liveStreamRef.current.delete(session.id)
         }
         const sid = session.id
-        chatApi
-          .getMessages(sid)
+        const wasAborted = aborted
+        // 中断 / 出错时后端用 fire-and-forget 写库，可能比 getMessages 还慢；
+        // 短延迟一拍，让数据库先落定，避免 reconcile 拿到旧快照后又被实时数据覆盖。
+        const fetchDelay = wasAborted || streamError ? 350 : 0
+        const fetchAfter = fetchDelay > 0 ? new Promise((r) => setTimeout(r, fetchDelay)) : Promise.resolve()
+        fetchAfter
+          .then(() => chatApi.getMessages(sid))
           .then((serverMsgs) => {
             const act = activeSessionRef.current
             if (act?.id === sid) {
@@ -856,14 +1145,16 @@ export default function ChatPage() {
                   serverMsgs,
                   streamedAssistant,
                   assistantMsg.id,
-                  streamError
+                  streamError,
+                  wasAborted
                 )
               )
-            } else if (streamError || streamedAssistant.trim()) {
+            } else if (streamError || wasAborted || streamedAssistant.trim()) {
               pendingChatReconcileRef.current.set(sid, {
                 streamedAssistant,
                 optimisticAssistantId: assistantMsg.id,
                 streamError,
+                aborted: wasAborted,
               })
             }
           })
@@ -935,20 +1226,65 @@ export default function ChatPage() {
     }
   }
 
-  const handleDeleteSession = async (
-    session: ChatSession,
-    e: React.MouseEvent
-  ) => {
+  /** 仅打开确认弹窗，真正删除发生在 confirmDeleteSession */
+  const handleDeleteSession = (session: ChatSession, e: React.MouseEvent) => {
     e.stopPropagation()
+    setSessionToDelete(session)
+  }
+
+  const confirmDeleteSession = async () => {
+    if (!sessionToDelete || deletingSession) return
+    const target = sessionToDelete
+    setDeletingSession(true)
     try {
-      await chatApi.deleteSession(session.id)
-      setSessions((prev) => prev.filter((s) => s.id !== session.id))
-      if (activeSession?.id === session.id) {
+      await chatApi.deleteSession(target.id)
+      setSessions((prev) => prev.filter((s) => s.id !== target.id))
+      if (activeSession?.id === target.id) {
         setActiveSession(null)
         activeSessionRef.current = null
       }
+      setSessionToDelete(null)
     } catch (e) {
       console.error(e)
+      window.alert("删除失败，请稍后重试")
+    } finally {
+      setDeletingSession(false)
+    }
+  }
+
+  /** 仅打开确认弹窗 */
+  const handleCleanupEmptySessions = () => {
+    if (cleaningEmpty) return
+    setCleanupConfirmOpen(true)
+  }
+
+  const confirmCleanupEmptySessions = async () => {
+    if (cleaningEmpty) return
+    setCleaningEmpty(true)
+    try {
+      const res = await chatApi.cleanupEmptySessions()
+      const removed = new Set(res.deleted_ids)
+      if (removed.size > 0) {
+        setSessions((prev) => prev.filter((s) => !removed.has(s.id)))
+        if (activeSession && removed.has(activeSession.id)) {
+          setActiveSession(null)
+          activeSessionRef.current = null
+        }
+      }
+      setCleanupConfirmOpen(false)
+      // 弹一个轻量提示（沿用 alert 即可，不阻断主流程）
+      setTimeout(() => {
+        if (res.deleted_count === 0) {
+          window.alert("没有可清理的空会话")
+        } else {
+          window.alert(`已清理 ${res.deleted_count} 个空会话`)
+        }
+      }, 50)
+    } catch (e) {
+      console.error(e)
+      window.alert("清理失败，请稍后重试")
+    } finally {
+      setCleaningEmpty(false)
     }
   }
 
@@ -1055,30 +1391,52 @@ export default function ChatPage() {
 
     let streamedAssistant = ""
     let streamError: string | null = null
+    let aborted = false
+
+    const controller = new AbortController()
+    streamAbortRef.current?.abort()
+    streamAbortRef.current = controller
 
     try {
       const res = await chatApi.regenerateStream(
         regenSessionId,
         assistantMsgId,
-        modelToUse
+        modelToUse,
+        controller.signal
       )
-      streamedAssistant = await consumeChatSSE(res, (acc) => {
-        setMessages((prev) => {
-          if (activeSessionRef.current?.id !== regenSessionId) return prev
-          return prev.map((m) =>
-            m.id === assistantMsgId ? { ...m, content: acc, streaming: true } : m
-          )
-        })
-      })
+      streamedAssistant = await consumeChatSSE(
+        res,
+        (acc) => {
+          setMessages((prev) => {
+            if (activeSessionRef.current?.id !== regenSessionId) return prev
+            return prev.map((m) =>
+              m.id === assistantMsgId ? { ...m, content: acc, streaming: true } : m
+            )
+          })
+        },
+        controller.signal
+      )
     } catch (e: unknown) {
-      streamError = e instanceof Error ? e.message : String(e)
-      const partial = streamErrorPartial(e)
-      if (partial) streamedAssistant = partial
+      if (e instanceof StreamAbortedByUser) {
+        aborted = true
+        const partial = e.partialAssistantText || ""
+        if (partial) streamedAssistant = partial
+      } else {
+        streamError = e instanceof Error ? e.message : String(e)
+        const partial = streamErrorPartial(e)
+        if (partial) streamedAssistant = partial
+      }
     } finally {
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null
+      }
       sendingRef.current = false
       setSending(false)
-      chatApi
-        .getMessages(regenSessionId)
+      const wasAborted = aborted
+      const fetchDelay = wasAborted || streamError ? 350 : 0
+      const fetchAfter = fetchDelay > 0 ? new Promise((r) => setTimeout(r, fetchDelay)) : Promise.resolve()
+      fetchAfter
+        .then(() => chatApi.getMessages(regenSessionId))
         .then((serverMsgs) => {
           const act = activeSessionRef.current
           if (act?.id === regenSessionId) {
@@ -1088,14 +1446,16 @@ export default function ChatPage() {
                 serverMsgs,
                 streamedAssistant,
                 assistantMsgId,
-                streamError
+                streamError,
+                wasAborted
               )
             )
-          } else if (streamError || streamedAssistant.trim()) {
+          } else if (streamError || wasAborted || streamedAssistant.trim()) {
             pendingChatReconcileRef.current.set(regenSessionId, {
               streamedAssistant,
               optimisticAssistantId: assistantMsgId,
               streamError,
+              aborted: wasAborted,
             })
           }
         })
@@ -1181,15 +1541,31 @@ export default function ChatPage() {
           <LayoutDashboard className="h-4 w-4" />
           工作台
         </Link>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={handleNewSession}
-          title="新对话"
-        >
-          <Plus className="h-4 w-4" />
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0 text-slate-500 hover:text-rose-600"
+            onClick={handleCleanupEmptySessions}
+            disabled={cleaningEmpty || sessions.length === 0}
+            title="清理空会话（删除所有没有消息的会话）"
+          >
+            {cleaningEmpty ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Eraser className="h-4 w-4" />
+            )}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={handleNewSession}
+            title="新对话"
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       <div className="px-3 pb-2">
@@ -1233,22 +1609,22 @@ export default function ChatPage() {
                   }
                 }}
                 className={cn(
-                  "group flex cursor-pointer items-center gap-1 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
+                  "group grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
                   activeSession?.id === session.id
                     ? "bg-white shadow-sm ring-1 ring-amber-200/80"
                     : "hover:bg-white/70 text-slate-700"
                 )}
               >
-                <span className="min-w-0 flex-1 truncate">{session.title}</span>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100"
+                <span className="min-w-0 truncate">{session.title}</span>
+                <button
+                  type="button"
                   onClick={(e) => handleDeleteSession(session, e)}
                   title="删除会话"
+                  aria-label="删除会话"
+                  className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-200/80 text-slate-500 transition hover:bg-rose-500 hover:text-white"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                  <X className="h-3 w-3" strokeWidth={2.5} />
+                </button>
               </div>
             ))}
           </div>
@@ -1285,8 +1661,11 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-[100dvh] w-full overflow-hidden bg-background">
-      {/* 桌面侧栏 */}
-      <aside className="hidden w-[272px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar md:flex">
+      {/* 桌面侧栏（可拖动调整宽度） */}
+      <aside
+        className="relative hidden shrink-0 flex-col border-r border-sidebar-border bg-sidebar md:flex"
+        style={{ width: `${sidebarWidth}px` }}
+      >
         <div className="flex items-center gap-2 border-b border-slate-200/80 px-4 py-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 shadow-sm">
             <Sparkles className="h-4 w-4 text-white" />
@@ -1299,6 +1678,24 @@ export default function ChatPage() {
           </div>
         </div>
         <div className="flex min-h-0 flex-1 flex-col">{SidebarBody}</div>
+        {/* 右边缘拖动条：可调侧栏宽度（220~480px）；双击恢复默认 */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="拖动调整侧栏宽度"
+          onMouseDown={startResizingSidebar}
+          onDoubleClick={() => {
+            setSidebarWidth(280)
+            try {
+              localStorage.setItem("chat-sidebar-width", "280")
+            } catch {}
+          }}
+          className={cn(
+            "absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-amber-300/60",
+            resizingSidebar && "bg-amber-400/70"
+          )}
+          title="拖动调整宽度（双击恢复默认）"
+        />
       </aside>
 
       {/* 移动端抽屉 */}
@@ -1437,7 +1834,7 @@ export default function ChatPage() {
         <div
           ref={messagesScrollRef}
           onScroll={onMessagesScroll}
-          className="min-h-0 flex-1 overflow-y-auto px-4 pb-32 pt-4 md:px-10"
+          className="min-h-0 flex-1 overflow-y-auto px-4 pb-32 pt-6 md:px-12"
         >
           {!activeSession ? (
             <div className="flex min-h-[48vh] flex-col items-center justify-center gap-6 px-2 text-center">
@@ -1472,12 +1869,12 @@ export default function ChatPage() {
               </p>
             </div>
           ) : (
-            <div className="mx-auto max-w-3xl space-y-10 pb-8">
+            <div className="mx-auto w-full max-w-[860px] space-y-8 pb-8">
               {messages.map((msg) => (
                 <div key={msg.id} className="group/msg">
                   {msg.role === "user" ? (
                     <div className="flex justify-end gap-3">
-                      <div className="max-w-[85%] rounded-2xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/80">
+                      <div className="max-w-[78%] rounded-2xl bg-amber-50/80 px-4 py-2.5 ring-1 ring-amber-200/50">
                         {msg.attachments && msg.attachments.length > 0 && (
                           <div className="mb-2 flex flex-wrap gap-2">
                             {msg.attachments.map((a, i) =>
@@ -1555,7 +1952,7 @@ export default function ChatPage() {
                     </div>
                   ) : (
                     <div className="flex gap-3">
-                      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100">
+                      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100/90 ring-1 ring-amber-200/60">
                         <Bot className="h-4 w-4 text-amber-800" />
                       </div>
                       <div className="min-w-0 flex-1">
@@ -1587,6 +1984,7 @@ export default function ChatPage() {
                             <MessageContent
                               content={msg.content}
                               streaming={msg.streaming}
+                              messageId={msg.id}
                             />
                             {!msg.streaming && (
                               <AssistantToolbar
@@ -1598,8 +1996,9 @@ export default function ChatPage() {
                                   }))
                                 }
                                 onCopy={() =>
-                                  copyTextToClipboard(
-                                    assistantPlainTextForCopy(msg.content)
+                                  copyAssistantRich(
+                                    msg.id,
+                                    msg.content
                                   )
                                 }
                                 onRegenerate={() => handleRegenerate(msg.id)}
@@ -1634,7 +2033,7 @@ export default function ChatPage() {
 
         {/* 底部输入 */}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-background via-background/95 to-transparent pb-4 pt-10">
-          <div className="pointer-events-auto mx-auto max-w-3xl px-4">
+          <div className="pointer-events-auto mx-auto w-full max-w-[860px] px-4">
             <div className="rounded-2xl border border-slate-200/90 bg-white p-2 shadow-lg shadow-slate-900/5">
               <input
                 ref={fileInputRef}
@@ -1781,19 +2180,29 @@ export default function ChatPage() {
                   </div>
                 </div>
 
-                <Button
-                  size="icon"
-                  className="h-10 w-10 shrink-0 rounded-xl"
-                  onClick={handleSend}
-                  disabled={
-                    (!input.trim() && pendingAttachments.length === 0) ||
-                    sending
-                  }
-                  type="button"
-                  title="发送"
-                >
-                  <Send className="h-4 w-4" />
-                </Button>
+                {sending ? (
+                  <Button
+                    size="icon"
+                    variant="destructive"
+                    className="h-10 w-10 shrink-0 rounded-xl"
+                    onClick={() => streamAbortRef.current?.abort()}
+                    type="button"
+                    title="停止生成"
+                  >
+                    <Square className="h-4 w-4 fill-current" />
+                  </Button>
+                ) : (
+                  <Button
+                    size="icon"
+                    className="h-10 w-10 shrink-0 rounded-xl"
+                    onClick={handleSend}
+                    disabled={!input.trim() && pendingAttachments.length === 0}
+                    type="button"
+                    title="发送"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
             </div>
             <p className="mt-2 text-center text-[11px] text-slate-500">
@@ -1909,6 +2318,103 @@ export default function ChatPage() {
             onApply={() => handleApplyDiff(diffDialog.taskId, diffDialog.newText)}
           />
         )}
+
+        {/* 删除单个会话 - 确认弹窗 */}
+        <AlertDialog
+          open={!!sessionToDelete}
+          onOpenChange={(open) => {
+            if (!open && !deletingSession) setSessionToDelete(null)
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle className="flex items-center gap-2">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-rose-100 text-rose-600">
+                  <Trash2 className="h-4 w-4" />
+                </span>
+                删除会话
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                即将删除会话{" "}
+                <span className="font-medium text-slate-900">
+                  「{sessionToDelete?.title || "新对话"}」
+                </span>
+                <br />
+                <span className="text-rose-600/90">
+                  该会话内的所有消息都会被清除，且无法恢复。
+                </span>
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deletingSession}>取消</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={(e) => {
+                  e.preventDefault()
+                  confirmDeleteSession()
+                }}
+                disabled={deletingSession}
+                className="bg-rose-600 text-white hover:bg-rose-700 focus-visible:ring-rose-300"
+              >
+                {deletingSession ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    删除中…
+                  </>
+                ) : (
+                  "确认删除"
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* 清理空会话 - 确认弹窗 */}
+        <AlertDialog
+          open={cleanupConfirmOpen}
+          onOpenChange={(open) => {
+            if (!open && !cleaningEmpty) setCleanupConfirmOpen(false)
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle className="flex items-center gap-2">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+                  <Eraser className="h-4 w-4" />
+                </span>
+                清理空会话
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                将自动删除你名下
+                <span className="font-medium text-slate-900">
+                  所有「没有任何消息」的会话
+                </span>
+                。已有消息的会话不会受到影响。
+                <br />
+                此操作无法撤销。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={cleaningEmpty}>取消</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={(e) => {
+                  e.preventDefault()
+                  confirmCleanupEmptySessions()
+                }}
+                disabled={cleaningEmpty}
+                className="bg-amber-600 text-white hover:bg-amber-700 focus-visible:ring-amber-300"
+              >
+                {cleaningEmpty ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    清理中…
+                  </>
+                ) : (
+                  "立即清理"
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>
   )
