@@ -21,6 +21,7 @@ from app.services.llm import llm_client
 from app.config import settings
 from app.utils.intent_detection import (
     detect_user_intent_with_llm,
+    detect_intent_by_keywords,
     UserIntent,
     generate_continue_prompt,
     should_continue_for_word_count,
@@ -843,18 +844,13 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
         )
 
         article_to_check = ""
-        # 暂时禁用意图识别，直接使用默认意图
-        logger.info("⚠️ Intent detection DISABLED for debugging | session=%s", session_id)
-        user_intent = UserIntent(
-            word_count_requirement=18000,  # 默认 18000 字
-            is_full_output=True,
-            is_continue_request=False,
-            is_check_request=False,
-            action="generate",
-            summary="生成内容",
-            target_section=None,
+        # 规则型意图识别（零延迟，无需额外 LLM 调用）
+        user_intent = detect_intent_by_keywords(user_request)
+        logger.info(
+            "✅ Intent | action=%s continue=%s check=%s word_count=%s target=%s | session=%s",
+            user_intent.action, user_intent.is_continue_request, user_intent.is_check_request,
+            user_intent.word_count_requirement, user_intent.target_section, session_id,
         )
-        logger.info("✅ Using default intent | word_count=18000 | session=%s", session_id)
 
         if user_intent:
             logger.info(

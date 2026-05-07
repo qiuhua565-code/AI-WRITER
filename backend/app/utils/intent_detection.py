@@ -1,4 +1,4 @@
-"""使用 LLM 识别用户意图"""
+"""用户意图识别（规则 + 可选 LLM）"""
 import json
 import logging
 import re
@@ -8,6 +8,175 @@ from dataclasses import dataclass
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class UserIntent:
+    """用户意图"""
+    word_count_requirement: Optional[int] = None  # 字数要求
+    is_full_output: bool = False  # 是否要求完整输出
+    is_continue_request: bool = False  # 是否要求继续之前的内容
+    is_check_request: bool = False  # 是否要求检查文章
+    action: str = "generate"  # 动作：generate/expand/revise/continue/check
+    summary: str = ""  # 意图摘要
+    target_section: Optional[str] = None  # 目标修改部分：引子/正文/卡点/结尾等
+
+
+# ── 规则型意图识别 ──────────────────────────────────────────────────────────
+
+_CONTINUE_KW = frozenset([
+    "继续", "接着", "往下写", "接下去", "继续写", "续写",
+    "继续输出", "接着写", "继续完成", "接着来", "补充完整",
+    "继续生成", "接着生成", "往后写",
+])
+_CHECK_KW = frozenset([
+    "检查", "审阅", "审查", "校对", "校稿", "查错",
+    "有没有问题", "有没有错", "有哪些问题", "有哪些错",
+    "错别字", "逻辑问题", "全文审阅", "帮我查",
+    "查一遍", "查一下", "核查", "帮我看看",
+])
+_EXPAND_KW = frozenset([
+    "扩写", "扩充", "加长", "加多", "增加字数", "字数不够",
+    "太短", "写短了", "再多写", "写长一点", "写长些",
+    "丰富一下", "详细一点", "详细些", "写详细",
+])
+_REVISE_KW = frozenset([
+    "修改", "改写", "重写", "改一下", "调整", "重新写",
+    "换一种", "换种方式", "润色", "优化", "改进",
+    "写得不好", "不够好", "改成", "换成",
+])
+_FULL_OUTPUT_KW = frozenset([
+    "重新输出", "全文输出", "输出完整版", "完整版",
+    "从头输出", "整理全文", "输出全文", "全部输出",
+    "重新生成", "从头生成", "重新写一遍",
+])
+
+# 目标章节匹配表：关键词 → target_section 值
+_SECTION_PATTERNS: list[tuple[list[str], str]] = [
+    (["引子", "开篇", "开场", "开头部分", "序章"], "引子"),
+    (["卡点", "付费点", "付费章节", "付费部分", "付费内容", "收费部分", "收费章节"], "卡点"),
+    (["结尾", "结局", "尾声", "收尾", "结束部分", "结束章节", "大结局"], "结尾"),
+    (["第一章", "第1章", "chapter_1"], "chapter_1"),
+    (["第二章", "第2章", "chapter_2"], "chapter_2"),
+    (["第三章", "第3章", "chapter_3"], "chapter_3"),
+    (["第四章", "第4章", "chapter_4"], "chapter_4"),
+    (["第五章", "第5章", "chapter_5"], "chapter_5"),
+    (["第六章", "第6章", "chapter_6"], "chapter_6"),
+    (["第七章", "第7章", "chapter_7"], "chapter_7"),
+    (["第八章", "第8章", "chapter_8"], "chapter_8"),
+    (["第九章", "第9章", "chapter_9"], "chapter_9"),
+    (["第十章", "第10章", "chapter_10"], "chapter_10"),
+    (["第十一章", "第11章", "chapter_11"], "chapter_11"),
+    (["第十二章", "第12章", "chapter_12"], "chapter_12"),
+]
+
+_WORD_COUNT_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*([万wW])?\s*字"
+)
+
+
+def _detect_word_count(text: str) -> Optional[int]:
+    """从文本中提取字数要求，如 '5000字'、'1万字'、'2w字'。"""
+    m = _WORD_COUNT_RE.search(text)
+    if not m:
+        return None
+    num = float(m.group(1))
+    unit = (m.group(2) or "").lower()
+    if unit in ("万", "w"):
+        num *= 10000
+    n = int(num)
+    return n if 500 <= n <= 200_000 else None
+
+
+def _detect_target_section(text: str) -> Optional[str]:
+    for keywords, section in _SECTION_PATTERNS:
+        if any(k in text for k in keywords):
+            return section
+    return None
+
+
+def detect_intent_by_keywords(user_message: str) -> UserIntent:
+    """
+    纯关键词规则意图识别，零延迟，覆盖最常用场景。
+
+    优先级：续写 > 检查 > 扩写 > 修改 > 完整输出 > 默认生成
+    """
+    text = (user_message or "").strip()
+
+    # 1. 续写/继续（最高优先级）
+    if any(k in text for k in _CONTINUE_KW):
+        return UserIntent(
+            word_count_requirement=None,
+            is_full_output=False,
+            is_continue_request=True,
+            is_check_request=False,
+            action="continue",
+            summary="继续之前中断的内容",
+            target_section=None,
+        )
+
+    # 2. 检查/审阅
+    if any(k in text for k in _CHECK_KW):
+        return UserIntent(
+            word_count_requirement=None,
+            is_full_output=False,
+            is_continue_request=False,
+            is_check_request=True,
+            action="check",
+            summary="检查文章质量",
+            target_section=_detect_target_section(text),
+        )
+
+    # 3. 后续：提取字数 & 目标章节（供下面各分支共用）
+    word_count = _detect_word_count(text)
+    target = _detect_target_section(text)
+
+    # 4. 扩写
+    if any(k in text for k in _EXPAND_KW):
+        return UserIntent(
+            word_count_requirement=word_count or 18000,
+            is_full_output=True,
+            is_continue_request=False,
+            is_check_request=False,
+            action="expand",
+            summary=f"扩写{'「' + target + '」' if target else '内容'}",
+            target_section=target,
+        )
+
+    # 5. 修改某部分
+    if any(k in text for k in _REVISE_KW):
+        return UserIntent(
+            word_count_requirement=word_count,
+            is_full_output=bool(any(k in text for k in _FULL_OUTPUT_KW)),
+            is_continue_request=False,
+            is_check_request=False,
+            action="revise",
+            summary=f"修改{'「' + target + '」' if target else '内容'}",
+            target_section=target,
+        )
+
+    # 6. 完整输出
+    if any(k in text for k in _FULL_OUTPUT_KW):
+        return UserIntent(
+            word_count_requirement=word_count or 18000,
+            is_full_output=True,
+            is_continue_request=False,
+            is_check_request=False,
+            action="generate",
+            summary="完整输出全文",
+            target_section=target,
+        )
+
+    # 7. 默认：生成新内容
+    return UserIntent(
+        word_count_requirement=word_count or 18000,
+        is_full_output=True,
+        is_continue_request=False,
+        is_check_request=False,
+        action="generate",
+        summary="生成内容",
+        target_section=target,
+    )
 
 # 过长用户正文易诱导模型「写文章」而非 JSON；意图识别只取前段
 _INTENT_USER_TEXT_MAX = 6000
@@ -64,18 +233,6 @@ def _extract_first_json_object(s: str) -> str | None:
             if depth == 0:
                 return s[start : i + 1]
     return None
-
-
-@dataclass
-class UserIntent:
-    """用户意图"""
-    word_count_requirement: Optional[int] = None  # 字数要求
-    is_full_output: bool = False  # 是否要求完整输出
-    is_continue_request: bool = False  # 是否要求继续之前的内容
-    is_check_request: bool = False  # 是否要求检查文章
-    action: str = "generate"  # 动作：generate/expand/revise/continue/check
-    summary: str = ""  # 意图摘要
-    target_section: Optional[str] = None  # 目标修改部分：引子/正文/卡点/结尾等
 
 
 async def detect_user_intent_with_llm(

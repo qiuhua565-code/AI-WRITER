@@ -59,7 +59,9 @@
       "Bash(docker-compose -f docker-compose.app-only.yml logs frontend --tail 50)",
       "Bash(curl -I https://aipipe.site/v1/messages)",
       "Bash(curl -I https://aipipe.site/v1/chat/completions)",
-      "Bash(curl -X POST https://aipipe.site/v1/messages -H \"Content-Type: application/json\" -H \"x-api-key: test\" -d '{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":10}')"
+      "Bash(curl -X POST https://aipipe.site/v1/messages -H \"Content-Type: application/json\" -H \"x-api-key: test\" -d '{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":10}')",
+      "Bash(where py *)",
+      "Bash(where python3.11)"
     ]
   }
 }

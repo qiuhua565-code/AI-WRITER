@@ -19,6 +19,7 @@ import {
   Send,
   Sparkles,
   Maximize2,
+  Minimize2,
   RotateCcw,
   Save,
   Replace,
@@ -216,6 +217,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
   const chatMessagesEndRef = useRef<HTMLDivElement>(null)
 
   const [articleCheckOpen, setArticleCheckOpen] = useState(false)
+  const [articleCheckMinimized, setArticleCheckMinimized] = useState(false)
   const [articleCheckLoading, setArticleCheckLoading] = useState(false)
   const [articleCheckReport, setArticleCheckReport] = useState("")
   const [articleCheckModel, setArticleCheckModel] = useState("")
@@ -1619,96 +1621,132 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
         )
       })()}
 
-      {/* Approve dialog */}
-      <Dialog
-        open={articleCheckOpen}
-        onOpenChange={(open) => {
-          setArticleCheckOpen(open)
-          if (!open) {
-            setArticleCheckLoading(false)
-            setArticleCheckReport("")
-            setArticleCheckModel("")
-            setArticleCheckDrag({ x: 0, y: 0 })
-          }
-        }}
-      >
-        <DialogContent
-          className="flex w-[min(100vw-1rem,52rem)] max-w-[min(100vw-1rem,52rem)] max-h-[min(92vh,900px)] flex-col gap-0 overflow-hidden border-slate-200/80 p-0 shadow-2xl sm:max-w-[min(100vw-1rem,52rem)]"
-          style={{
-            transform: `translate(calc(-50% + ${articleCheckDrag.x}px), calc(-50% + ${articleCheckDrag.y}px))`,
-          }}
-        >
+      {/* 全文审阅浮窗（非 modal，不阻塞文章阅读；支持拖动、最小化） */}
+      {articleCheckOpen && (() => {
+        const close = () => {
+          setArticleCheckOpen(false)
+          setArticleCheckMinimized(false)
+          setArticleCheckLoading(false)
+          setArticleCheckReport("")
+          setArticleCheckModel("")
+          setArticleCheckDrag({ x: 0, y: 0 })
+        }
+        return (
           <div
-            className="flex shrink-0 cursor-grab touch-none items-start gap-2 border-b border-slate-200/80 bg-slate-50/90 px-4 py-3 select-none active:cursor-grabbing sm:px-5"
-            onPointerDown={(e) => {
-              if ((e.target as HTMLElement).closest("button")) return
-              const t = e.currentTarget
-              t.setPointerCapture(e.pointerId)
-              articleCheckDragRef.current = {
-                active: true,
-                startX: e.clientX,
-                startY: e.clientY,
-                originX: articleCheckDragRefPos.current.x,
-                originY: articleCheckDragRefPos.current.y,
-              }
-            }}
-            onPointerMove={(e) => {
-              const r = articleCheckDragRef.current
-              if (!r.active) return
-              setArticleCheckDrag({
-                x: r.originX + e.clientX - r.startX,
-                y: r.originY + e.clientY - r.startY,
-              })
-            }}
-            onPointerUp={(e) => {
-              const r = articleCheckDragRef.current
-              if (!r.active) return
-              r.active = false
-              try {
-                e.currentTarget.releasePointerCapture(e.pointerId)
-              } catch {
-                /* ignore */
-              }
-            }}
-            onPointerCancel={(e) => {
-              articleCheckDragRef.current.active = false
-              try {
-                e.currentTarget.releasePointerCapture(e.pointerId)
-              } catch {
-                /* ignore */
-              }
+            className="fixed z-50 flex flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-2xl"
+            style={{
+              width: "min(calc(100vw - 1rem), 52rem)",
+              maxHeight: articleCheckMinimized ? "auto" : "min(92vh, 860px)",
+              left: "50%",
+              top: "50%",
+              transform: `translate(calc(-50% + ${articleCheckDrag.x}px), calc(-50% + ${articleCheckDrag.y}px))`,
             }}
           >
-            <GripVertical className="mt-1 h-5 w-5 shrink-0 text-slate-400" aria-hidden />
-            <DialogHeader className="min-w-0 flex-1 space-y-1.5 border-0 p-0 text-left">
-              <DialogTitle className="pr-8 text-base sm:text-lg">全文审阅检查</DialogTitle>
-              <DialogDescription className="text-left text-xs text-muted-foreground">
-                {articleCheckModel
-                  ? `本次调用模型：${articleCheckModel}`
-                  : "对当前正文做结构化审阅（称谓、逻辑、时间线、免费/卡点、剧透、字数、重复、真实信息、分段等）。长文可能需数分钟，期间会持续推送心跳以防网关超时。"}
-              </DialogDescription>
-              <p className="text-[11px] text-slate-500">拖拽左侧抓手或本标题区域可移动窗口</p>
-            </DialogHeader>
-          </div>
-          <ScrollArea className="min-h-0 max-h-[min(70vh,680px)] flex-1 overflow-hidden px-4 py-3 sm:px-5">
-            {articleCheckLoading ? (
-              <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
-                <Loader2 className="h-5 w-5 shrink-0 animate-spin" />
-                正在审阅全文，请稍候…
+            {/* 标题栏（可拖动） */}
+            <div
+              className="flex shrink-0 cursor-grab touch-none items-start gap-2 border-b border-slate-200/80 bg-slate-50/90 px-4 py-3 select-none active:cursor-grabbing sm:px-5"
+              onPointerDown={(e) => {
+                if ((e.target as HTMLElement).closest("button")) return
+                const t = e.currentTarget
+                t.setPointerCapture(e.pointerId)
+                articleCheckDragRef.current = {
+                  active: true,
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  originX: articleCheckDragRefPos.current.x,
+                  originY: articleCheckDragRefPos.current.y,
+                }
+              }}
+              onPointerMove={(e) => {
+                const r = articleCheckDragRef.current
+                if (!r.active) return
+                setArticleCheckDrag({
+                  x: r.originX + e.clientX - r.startX,
+                  y: r.originY + e.clientY - r.startY,
+                })
+              }}
+              onPointerUp={(e) => {
+                const r = articleCheckDragRef.current
+                if (!r.active) return
+                r.active = false
+                try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+              }}
+              onPointerCancel={(e) => {
+                articleCheckDragRef.current.active = false
+                try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+              }}
+            >
+              <GripVertical className="mt-1 h-5 w-5 shrink-0 text-slate-400" aria-hidden />
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-base font-semibold text-slate-900 sm:text-lg">全文审阅检查</p>
+                {!articleCheckMinimized && (
+                  <p className="text-xs text-muted-foreground">
+                    {articleCheckModel
+                      ? `本次调用模型：${articleCheckModel}`
+                      : "对当前正文做结构化审阅（称谓、逻辑、时间线、免费/卡点、剧透、字数、重复、真实信息、分段等）。长文可能需数分钟。"}
+                  </p>
+                )}
+                {!articleCheckMinimized && (
+                  <p className="text-[11px] text-slate-400">拖拽抓手或本区域可移动窗口</p>
+                )}
               </div>
-            ) : (
-              <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-slate-800">
-                {articleCheckReport || "（无内容）"}
-              </pre>
+              {/* 最小化 / 恢复 */}
+              <button
+                type="button"
+                title={articleCheckMinimized ? "展开" : "最小化（继续看文章）"}
+                className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-200/70 hover:text-slate-800"
+                onClick={() => setArticleCheckMinimized((v) => !v)}
+              >
+                {articleCheckMinimized ? <Maximize2 className="h-4 w-4" /> : <Minimize2 className="h-4 w-4" />}
+              </button>
+              {/* 关闭 */}
+              <button
+                type="button"
+                title="关闭"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-200/70 hover:text-red-600"
+                onClick={close}
+              >
+                <XCircle className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* 内容区（最小化时隐藏） */}
+            {!articleCheckMinimized && (
+              <>
+                <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-5" style={{ maxHeight: "min(68vh, 680px)" }}>
+                  {articleCheckLoading ? (
+                    <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
+                      <Loader2 className="h-5 w-5 shrink-0 animate-spin" />
+                      正在审阅全文，请稍候…
+                    </div>
+                  ) : (
+                    <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-slate-800">
+                      {articleCheckReport || "（无内容）"}
+                    </pre>
+                  )}
+                </div>
+                <div className="shrink-0 border-t border-slate-200/80 bg-white/95 px-4 py-3 sm:px-5">
+                  <Button type="button" variant="outline" onClick={close}>
+                    关闭
+                  </Button>
+                </div>
+              </>
             )}
-          </ScrollArea>
-          <DialogFooter className="shrink-0 border-t border-slate-200/80 bg-white/95 px-4 py-3 sm:px-5">
-            <Button type="button" variant="outline" onClick={() => setArticleCheckOpen(false)}>
-              关闭
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+
+            {/* 最小化状态下的状态条 */}
+            {articleCheckMinimized && (
+              <div className="flex items-center gap-2 px-4 py-2 text-xs text-slate-600">
+                {articleCheckLoading
+                  ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> 审阅中…</>
+                  : articleCheckReport
+                    ? <><CheckCircle className="h-3.5 w-3.5 text-green-600" /> 审阅完成，点击展开查看报告</>
+                    : "等待开始…"
+                }
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       <Dialog open={showApproveDialog} onOpenChange={setShowApproveDialog}>
         <DialogContent>

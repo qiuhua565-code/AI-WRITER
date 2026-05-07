@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -8,6 +9,17 @@ logger = logging.getLogger(__name__)
 
 # 任务超过此时长仍未完成 → 视为卡死，标记失败
 _MAX_TASK_AGE_HOURS = 16
+
+
+def _run_async(coro):
+    """
+    在独立线程里运行 async 协程，规避 gevent worker 中已有事件循环导致的
+    'asyncio.run() cannot be called from a running event loop' 错误。
+    每次都起新线程 + 新事件循环，互不干扰。
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(asyncio.run, coro)
+        return future.result()
 
 
 @celery_app.task(
@@ -31,7 +43,7 @@ def run_story(self, task_id: int, user_id: int = None):
 
     reset_redis_pool()
     try:
-        asyncio.run(EmotionStoryOrchestrator(task_id).run())
+        _run_async(EmotionStoryOrchestrator(task_id).run())
     except NoKeyConfiguredError as exc:
         # 管理员还没配置 Key，立即失败，不要傻等
         logger.error("Task %s failed: no system key configured", task_id)
@@ -68,12 +80,11 @@ def _is_task_too_old(task_id: int) -> bool:
                 return True  # 任务已被删除，不再重试
             age = datetime.now(timezone.utc) - task.created_at.replace(tzinfo=timezone.utc)
             return age > timedelta(hours=_MAX_TASK_AGE_HOURS)
-    return asyncio.run(_check())
+    return _run_async(_check())
 
 
 def _set_task_key_queue_waiting(task_id: int) -> None:
     """用户绑定 Key 时不会走此分支；仅系统池抢锁失败时提示排队原因。"""
-
     async def _do():
         from app.database import AsyncSessionLocal
         from app.models.task import Task
@@ -86,7 +97,7 @@ def _set_task_key_queue_waiting(task_id: int) -> None:
                 task.warning_msg = KEY_QUEUE_WAITING_MSG
                 await db.commit()
 
-    asyncio.run(_do())
+    _run_async(_do())
 
 
 def _mark_task_failed(task_id: int, error_msg: str):
@@ -100,4 +111,4 @@ def _mark_task_failed(task_id: int, error_msg: str):
                 task.status = "failed"
                 task.error_msg = error_msg
                 await db.commit()
-    asyncio.run(_do())
+    _run_async(_do())

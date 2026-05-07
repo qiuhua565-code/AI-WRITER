@@ -634,6 +634,9 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sendingRef = useRef(false)
+  /** 实时追踪每个 session 正在进行的流式内容，切换 session 再切回时用于恢复显示。
+   *  done=true 表示流已结束（含出错），内容保留供切回时展示；发新消息时会被覆盖。 */
+  const liveStreamRef = useRef<Map<number, { content: string; msgId: number; done?: boolean }>>(new Map())
   /** 流式结束时若用户已切到其它会话，在此暂存 reconcile 参数，切回本会话时与 getMessages 结果合并 */
   const pendingChatReconcileRef = useRef<
     Map<
@@ -721,6 +724,30 @@ export default function ChatPage() {
       .getMessages(sid)
       .then((rows) => {
         if (activeSessionRef.current?.id !== sid) return
+
+        // 1. 优先：该 session 正有流在跑，把当前流式内容合并进去
+        const live = liveStreamRef.current.get(sid)
+        if (live) {
+          const base = [...rows] as DisplayMessage[]
+          const idx = base.findLastIndex((m) => m.role === "assistant")
+          const streamingMsg: DisplayMessage = {
+            id: live.msgId,
+            role: "assistant",
+            content: live.content,
+            model: null,
+            created_at: new Date().toISOString(),
+            streaming: !live.done,
+          }
+          if (idx >= 0 && base[idx].id === live.msgId) {
+            base[idx] = streamingMsg
+          } else {
+            base.push(streamingMsg)
+          }
+          setMessages(base)
+          return
+        }
+
+        // 2. 流已结束但用户当时切走了，用 pending reconcile 合并
         const pending = pendingChatReconcileRef.current.get(sid)
         if (pending) {
           setMessages(
@@ -776,6 +803,9 @@ export default function ChatPage() {
       })
       followStreamOutputRef.current = true
 
+      // 初始化 liveStreamRef，让切回时能看到正在生成的内容
+      liveStreamRef.current.set(session.id, { content: "", msgId: assistantMsg.id })
+
       let streamedAssistant = ""
       let streamError: string | null = null
 
@@ -788,6 +818,8 @@ export default function ChatPage() {
           context
         )
         streamedAssistant = await consumeChatSSE(res, (acc) => {
+          // 始终更新 liveStreamRef，无论当前在哪个 session
+          liveStreamRef.current.set(session.id, { content: acc, msgId: assistantMsg.id })
           setMessages((prev) => {
             if (activeSessionRef.current?.id !== session.id) return prev
             return prev.map((m) =>
@@ -799,7 +831,19 @@ export default function ChatPage() {
         streamError = e instanceof Error ? e.message : String(e)
         const partial = streamErrorPartial(e)
         if (partial) streamedAssistant = partial
+        // 出错时把已收到内容存入 liveStreamRef 并标记 done，
+        // 这样切走再切回仍能看到已生成的正文，不会变空
+        const errorDisplay = streamedAssistant.trim()
+          ? `${streamedAssistant.trim()}\n\n—\n（未能完整保存：${streamError}）`
+          : ""
+        if (errorDisplay) {
+          liveStreamRef.current.set(session.id, { content: errorDisplay, msgId: assistantMsg.id, done: true })
+        }
       } finally {
+        // 正常完成才清除 liveStreamRef；出错时保留（done:true），下次发新消息时会被覆盖
+        if (!streamError) {
+          liveStreamRef.current.delete(session.id)
+        }
         const sid = session.id
         chatApi
           .getMessages(sid)
