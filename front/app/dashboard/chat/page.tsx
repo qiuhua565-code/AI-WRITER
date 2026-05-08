@@ -6,8 +6,12 @@ import {
   useRef,
   useCallback,
   useMemo,
+  createContext,
+  useContext,
   type ReactNode,
   type HTMLAttributes,
+  type ImgHTMLAttributes,
+  type AnchorHTMLAttributes,
 } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -43,6 +47,7 @@ import {
   Loader2,
   Eraser,
   Square,
+  AlertCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -88,7 +93,15 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { cn } from "@/lib/utils"
-import { chatApi, ChatSession, ChatMessage, ChatAttachmentPart, isDocAttachmentMeta, tasksApi } from "@/lib/api"
+import {
+  chatApi,
+  ChatSession,
+  ChatMessage,
+  ChatAttachmentPart,
+  ChatMessageAttachment,
+  isDocAttachmentMeta,
+  tasksApi,
+} from "@/lib/api"
 import { useAuthStore } from "@/lib/store/auth"
 import {
   CHAT_MODEL_OPTIONS,
@@ -97,6 +110,10 @@ import {
 } from "@/lib/chat-models"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import remarkMath from "remark-math"
+import rehypeKatex from "rehype-katex"
+import rehypeRaw from "rehype-raw"
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize"
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
 import { oneDark } from "react-syntax-highlighter/dist/cjs/styles/prism"
 
@@ -223,6 +240,42 @@ async function ingestLocalFiles(
     }
   }
   if (next.length) append(next)
+}
+
+/** 与后端 `_attachment_kind` 对齐，用于乐观渲染时把待发附件转成 API 同形展示结构 */
+function localAttachmentKind(a: ChatAttachmentPart): "mm" | "docx" | "text" {
+  const mt = (a.media_type || "").split(";")[0].trim().toLowerCase()
+  const fn = (a.file_name || "").toLowerCase()
+  if (MM_UPLOAD_TYPES.has(mt)) return "mm"
+  if (mt === DOCX_MEDIA_TYPE || fn.endsWith(".docx")) return "docx"
+  if (TEXT_MIME_TYPES.has(mt)) return "text"
+  if (TEXT_EXT_RE.test(fn)) return "text"
+  return "mm"
+}
+
+function optimisticMessageAttachments(parts: ChatAttachmentPart[]): ChatMessageAttachment[] {
+  return parts.map((a) => {
+    const kind = localAttachmentKind(a)
+    if (kind === "mm") {
+      return { media_type: a.media_type, data: a.data, file_name: a.file_name }
+    }
+    const filename = a.file_name || "附件"
+    if (kind === "docx") {
+      return { kind: "docx", filename, lines: 1 }
+    }
+    let lines = 1
+    try {
+      const bin = atob(a.data)
+      const text = new TextDecoder("utf-8", { fatal: false }).decode(
+        Uint8Array.from(bin, (c) => c.charCodeAt(0))
+      )
+      const n = text.split(/\r?\n/).length
+      lines = Math.max(1, n)
+    } catch {
+      lines = 1
+    }
+    return { kind: "text", filename, lines }
+  })
 }
 
 /** 流式中途失败时附带浏览器已收到的正文 */
@@ -482,7 +535,9 @@ function splitAssistantSegments(raw: string): ChatSegment[] {
 
 /** 复制用：优先只要正文段落；若只有思考块则回退为去掉标签后的全文 */
 function assistantPlainTextForCopy(raw: string): string {
-  const cleaned = sanitizeAssistantDisplay(raw, false)
+  // 复制时不应该把 `（已停止生成）`/`（未能完整保存：xxx）` 也带走
+  const { body } = extractTailNotice(raw)
+  const cleaned = sanitizeAssistantDisplay(body, false)
   const bodyOnly = splitAssistantSegments(cleaned)
     .filter((s) => s.kind === "body")
     .map((s) => s.body)
@@ -490,7 +545,7 @@ function assistantPlainTextForCopy(raw: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim()
   if (bodyOnly) return bodyOnly
-  return sanitizeAssistantDisplay(raw, false).trim()
+  return sanitizeAssistantDisplay(body, false).trim()
 }
 
 async function copyTextToClipboard(text: string): Promise<void> {
@@ -535,6 +590,8 @@ function buildHtmlFromMessageNode(node: HTMLElement): string {
   const cloned = node.cloneNode(true) as HTMLElement
   // 移除「思考过程」可折叠块（避免把分析内容也粘到 Word）
   cloned.querySelectorAll("details, summary").forEach((el) => el.remove())
+  // 移除任何标了 data-no-copy 的辅助元素（错误 banner / 状态条等）
+  cloned.querySelectorAll("[data-no-copy]").forEach((el) => el.remove())
   // 清理 React 内部 / 组件库残留属性，避免 Word 报错或乱嵌入数据
   const attrBlacklistPrefix = ["data-radix", "data-state", "data-msg-id", "data-md-body"]
   const treeWalk = (el: Element) => {
@@ -551,19 +608,62 @@ function buildHtmlFromMessageNode(node: HTMLElement): string {
   return `<!doctype html><html><head><meta charset="utf-8"></head><body style="font-family:'PingFang SC','Microsoft YaHei',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.85;color:#1f2937;">${cloned.innerHTML}</body></html>`
 }
 
+/**
+ * Legacy 富文本复制：用 Selection + execCommand("copy") 复制 DOM 节点的渲染结果。
+ * 适用 HTTP 部署或不支持 ClipboardItem 的浏览器。Word/WPS 会拿到 text/html，记事本拿 text/plain。
+ */
+function copyRichViaSelection(sourceNode: HTMLElement): boolean {
+  if (typeof document === "undefined") return false
+  const wrapper = document.createElement("div")
+  wrapper.contentEditable = "true"
+  wrapper.style.position = "fixed"
+  wrapper.style.left = "-99999px"
+  wrapper.style.top = "0"
+  wrapper.style.opacity = "0"
+  wrapper.style.pointerEvents = "none"
+  wrapper.style.userSelect = "text"
+  wrapper.innerHTML = sourceNode.innerHTML
+  document.body.appendChild(wrapper)
+
+  const selection = window.getSelection()
+  const prevRanges: Range[] = []
+  if (selection) {
+    for (let i = 0; i < selection.rangeCount; i++) {
+      prevRanges.push(selection.getRangeAt(i).cloneRange())
+    }
+    selection.removeAllRanges()
+  }
+
+  const range = document.createRange()
+  range.selectNodeContents(wrapper)
+  selection?.addRange(range)
+
+  let ok = false
+  try {
+    ok = document.execCommand("copy")
+  } catch {
+    ok = false
+  }
+
+  selection?.removeAllRanges()
+  for (const r of prevRanges) selection?.addRange(r)
+  wrapper.remove()
+  return ok
+}
+
 async function copyAssistantRich(messageId: number, fallbackMarkdown: string): Promise<void> {
   if (typeof window === "undefined") return
   const node = document.querySelector<HTMLElement>(`[data-msg-id="${messageId}"][data-md-body]`)
   const plain = assistantPlainTextForCopy(fallbackMarkdown)
 
-  // 富文本路径：需要 ClipboardItem + clipboard.write
-  const canRich =
+  // ① 优先：现代 ClipboardItem API（HTTPS / secure context 下可用）
+  const canRichModern =
     typeof window.ClipboardItem !== "undefined" &&
     typeof navigator !== "undefined" &&
     !!navigator.clipboard &&
     typeof navigator.clipboard.write === "function"
 
-  if (node && canRich) {
+  if (node && canRichModern) {
     try {
       const html = buildHtmlFromMessageNode(node)
       const item = new window.ClipboardItem({
@@ -573,10 +673,16 @@ async function copyAssistantRich(messageId: number, fallbackMarkdown: string): P
       await navigator.clipboard.write([item])
       return
     } catch {
-      /* 浏览器拒绝（HTTP 环境 / 权限）：降级 */
+      /* HTTP / 权限拒绝 → 走 ② */
     }
   }
-  await copyTextToClipboard(plain)
+
+  // ② 兼容：legacy execCommand + Selection（HTTP 环境也能拿到富文本）
+  if (node && copyRichViaSelection(node)) return
+
+  // ③ 兜底：纯文本（用渲染后的 innerText 而不是 markdown 源码，避免出现 # / ** 等符号）
+  const plainFallback = node?.innerText?.trim() || plain
+  await copyTextToClipboard(plainFallback)
 }
 
 function CodeBlockWithHeader({
@@ -636,6 +742,123 @@ function CodeBlockWithHeader({
   )
 }
 
+/**
+ * 给 ReactMarkdown 一份共享 plugin 配置：
+ * - remark-gfm：GFM 扩展（表格 / 删除线 / 任务清单 / 自动链接）
+ * - remark-math + rehype-katex：渲染 $...$ / $$...$$ 数学公式
+ * - rehype-raw：解析 LLM 偶尔吐出的原生 HTML（<kbd>、<sub>、<sup>、<mark>、<u>、<details> 等）
+ * - rehype-sanitize：基于扩展白名单兜底过滤，不让 raw HTML 引入 XSS
+ */
+const chatRemarkPlugins = [remarkGfm, remarkMath]
+
+const chatSanitizeSchema = (() => {
+  const tagNames = Array.from(
+    new Set([
+      ...(defaultSchema.tagNames || []),
+      "kbd",
+      "sub",
+      "sup",
+      "mark",
+      "u",
+      "details",
+      "summary",
+      "ins",
+      "del",
+      "abbr",
+      "small",
+    ]),
+  )
+  // 在 katex 节点上保留必要 className/style，让公式样式不被剥掉
+  const attributes = {
+    ...(defaultSchema.attributes || {}),
+    "*": [
+      ...(((defaultSchema.attributes || {})["*"]) || []),
+      "className",
+      "style",
+    ],
+    code: [
+      ...(((defaultSchema.attributes || {})["code"]) || []),
+      "className",
+    ],
+    span: [
+      ...(((defaultSchema.attributes || {})["span"]) || []),
+      "className",
+      "style",
+    ],
+    div: [
+      ...(((defaultSchema.attributes || {})["div"]) || []),
+      "className",
+      "style",
+    ],
+    a: [
+      ...(((defaultSchema.attributes || {})["a"]) || []),
+      "href",
+      "title",
+      "target",
+      "rel",
+    ],
+    img: [
+      ...(((defaultSchema.attributes || {})["img"]) || []),
+      "src",
+      "alt",
+      "title",
+      "loading",
+    ],
+  }
+  return { ...defaultSchema, tagNames, attributes }
+})()
+
+const chatRehypePlugins = [
+  rehypeRaw,
+  [rehypeSanitize, chatSanitizeSchema],
+  rehypeKatex,
+] as const
+
+/**
+ * 图片放大 lightbox 的 context：MessageContent 内 <img> 通过它拿到 page 级
+ * 的开图函数，无需把回调一路 prop drill 下来。
+ */
+const ChatLightboxCtx = createContext<((src: string, alt?: string) => void) | null>(null)
+
+function ChatImage(props: ImgHTMLAttributes<HTMLImageElement>) {
+  const open = useContext(ChatLightboxCtx)
+  const { src, alt, className, onClick, ...rest } = props
+  const handleClick: React.MouseEventHandler<HTMLImageElement> = (e) => {
+    onClick?.(e)
+    if (e.defaultPrevented) return
+    if (open && typeof src === "string" && src) open(src, alt)
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      {...rest}
+      src={src}
+      alt={alt || ""}
+      loading="lazy"
+      onClick={handleClick}
+      className={cn(className, "cursor-zoom-in transition hover:opacity-90")}
+    />
+  )
+}
+
+function ChatLink({
+  href,
+  children,
+  ...rest
+}: AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const isExternal = typeof href === "string" && /^https?:\/\//i.test(href)
+  return (
+    <a
+      {...rest}
+      href={href}
+      target={isExternal ? "_blank" : rest.target}
+      rel={isExternal ? "noopener noreferrer" : rest.rel}
+    >
+      {children}
+    </a>
+  )
+}
+
 const chatMarkdownComponents = {
   pre({ children }: { children?: ReactNode }) {
     return <>{children}</>
@@ -664,6 +887,155 @@ const chatMarkdownComponents = {
       </code>
     )
   },
+  a: ChatLink,
+  img: ChatImage,
+}
+
+/**
+ * 流式途中可能出现"代码块还没收到结束 ``` 三连点"的瞬态。此时 react-markdown 会
+ * 把后续所有内容一直当成代码块，直到收到关闭符。视觉上整段文案塌成黑底，体验差。
+ *
+ * 这里在流式状态下若末尾的 ``` 数量为奇数，临时补一个虚拟 ``` 让它先完结，
+ * 等下个 token 到来重新判断时自然恢复。仅影响显示，不污染 raw content。
+ */
+function autoCloseUnfinishedFence(input: string): string {
+  if (!input) return input
+  const fenceCount = (input.match(/```/g) || []).length
+  if (fenceCount % 2 === 1) {
+    return input + "\n```"
+  }
+  return input
+}
+
+/**
+ * 从助手消息末尾识别 `（已停止生成）` / `（未能完整保存：xxx）` 之类的状态尾标，
+ * 单独抽出来交给红色 banner 渲染，正文里去掉这一行——这样：
+ * - 错误信息有醒目的视觉区分（不是和正文一坨黑字）
+ * - 复制 / 导出时不会把"已停止生成"也带走
+ */
+type AssistantTailNotice =
+  | { kind: "aborted" }
+  | { kind: "error"; message: string }
+  | { kind: "error_only"; message: string }
+
+function extractTailNotice(content: string): {
+  body: string
+  notice: AssistantTailNotice | null
+} {
+  if (!content) return { body: content, notice: null }
+  const t = content.replace(/\s+$/, "")
+
+  // a) 末尾 `\n\n—\n（未能完整保存：...）` 由后端 / 前端 catch 分支拼接
+  const errMatch = t.match(/\n\n—\n（未能完整保存：([^）]+)）\s*$/)
+  if (errMatch) {
+    return {
+      body: t.slice(0, errMatch.index).replace(/\s+$/, ""),
+      notice: { kind: "error", message: errMatch[1] },
+    }
+  }
+
+  // b) 整条都是"请求失败：xxx" —— 流一字未出错时后端写库的 fallback
+  const onlyErrMatch = t.match(/^请求失败：([\s\S]*?)\n+请重试.*$/)
+  if (onlyErrMatch) {
+    return {
+      body: "",
+      notice: { kind: "error_only", message: onlyErrMatch[1].trim() },
+    }
+  }
+
+  // c) 末尾 `\n\n—\n（已停止生成）` 用户中断
+  if (/\n\n—\n（已停止生成）\s*$/.test(t)) {
+    return {
+      body: t.replace(/\n\n—\n（已停止生成）\s*$/, "").replace(/\s+$/, ""),
+      notice: { kind: "aborted" },
+    }
+  }
+
+  // d) 单独一句"（已停止生成）"（一字未出就被中断）
+  if (/^（已停止生成）\s*$/.test(t)) {
+    return { body: "", notice: { kind: "aborted" } }
+  }
+
+  return { body: content, notice: null }
+}
+
+/**
+ * 图片放大遮罩。点遮罩 / ESC 关闭；不依赖 Dialog 组件，避免引入额外 DOM 复杂度。
+ */
+function ImageLightbox({
+  src,
+  alt,
+  onClose,
+}: {
+  src: string
+  alt?: string
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    document.addEventListener("keydown", onKey)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    return () => {
+      document.removeEventListener("keydown", onKey)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [onClose])
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-950/85 backdrop-blur-sm"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={alt || ""}
+        className="max-h-[92vh] max-w-[92vw] rounded-lg shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute right-4 top-4 inline-flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+        aria-label="关闭"
+      >
+        <X className="h-5 w-5" />
+      </button>
+    </div>
+  )
+}
+
+function AssistantTailNoticeBanner({ notice }: { notice: AssistantTailNotice }) {
+  const isAborted = notice.kind === "aborted"
+  const Icon = isAborted ? Square : AlertCircle
+  const title = isAborted ? "已停止生成" : "回答未能完整保存"
+  const detail = notice.kind === "aborted"
+    ? "你主动中断了这次回复，上方是中断前已生成的内容。"
+    : notice.message
+  const tone = isAborted
+    ? "border-slate-200 bg-slate-50/80 text-slate-600"
+    : "border-rose-200 bg-rose-50/80 text-rose-700"
+  return (
+    <div
+      data-no-copy
+      className={cn(
+        "not-prose mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-[13px]",
+        tone,
+      )}
+    >
+      <Icon className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", isAborted ? "text-slate-500" : "text-rose-500")} />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">{title}</div>
+        {detail ? (
+          <div className="mt-0.5 break-words text-[12px] opacity-90">{detail}</div>
+        ) : null}
+      </div>
+    </div>
+  )
 }
 
 function MessageContent({
@@ -676,11 +1048,17 @@ function MessageContent({
   /** 复制富文本时定位 DOM 节点的锚点 */
   messageId?: number
 }) {
-  const displaySource = useMemo(
-    () => sanitizeAssistantDisplay(content, streaming),
-    [content, streaming]
-  )
-  const segments = useMemo(() => splitAssistantSegments(displaySource), [displaySource])
+  // 1) 先把尾部状态条（已停止生成 / 未能完整保存）抽出来，独立成红色/灰色 banner，
+  //    避免和正文混在一坨黑字里；同时 banner DOM 标 data-no-copy 让复制时被剔除。
+  const { body, notice } = useMemo(() => extractTailNotice(content), [content])
+
+  // 2) 流式途中如果出现未闭合的 ```，临时补一个 ```，防止整段被吞进代码块
+  const sanitized = useMemo(() => {
+    const cleaned = sanitizeAssistantDisplay(body, streaming)
+    return streaming ? autoCloseUnfinishedFence(cleaned) : cleaned
+  }, [body, streaming])
+
+  const segments = useMemo(() => splitAssistantSegments(sanitized), [sanitized])
   const thinkTitle = (tag?: string) => {
     if (tag === "redacted_thinking") return "思考过程（已脱敏）"
     if (tag === "reasoning" || tag === "analysis") return "推理与分析"
@@ -713,12 +1091,21 @@ function MessageContent({
       [&_thead]:bg-slate-50 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold [&_th]:text-slate-700 [&_th]:border-b [&_th]:border-slate-200
       [&_td]:px-3 [&_td]:py-2 [&_td]:border-b [&_td]:border-slate-100
       [&_tbody_tr:nth-child(even)]:bg-slate-50/40
-      [&_img]:rounded-lg [&_img]:shadow-sm [&_img]:my-3"
+      [&_img]:rounded-lg [&_img]:shadow-sm [&_img]:my-3
+      [&_kbd]:rounded [&_kbd]:border [&_kbd]:border-slate-300 [&_kbd]:bg-slate-50 [&_kbd]:px-1.5 [&_kbd]:py-[1px] [&_kbd]:text-[12px] [&_kbd]:font-mono [&_kbd]:text-slate-700 [&_kbd]:shadow-[inset_0_-1px_0_rgba(0,0,0,0.08)]
+      [&_mark]:bg-amber-100/80 [&_mark]:text-amber-900 [&_mark]:rounded [&_mark]:px-0.5
+      [&_sup]:text-[10px] [&_sub]:text-[10px]
+      [&_input[type=checkbox]]:!appearance-none [&_input[type=checkbox]]:!h-[15px] [&_input[type=checkbox]]:!w-[15px] [&_input[type=checkbox]]:!align-[-2px] [&_input[type=checkbox]]:!rounded-[4px] [&_input[type=checkbox]]:!border [&_input[type=checkbox]]:!border-slate-300 [&_input[type=checkbox]]:!bg-white [&_input[type=checkbox]]:!mr-1.5
+      [&_input[type=checkbox]:checked]:!border-emerald-500 [&_input[type=checkbox]:checked]:!bg-emerald-500 [&_input[type=checkbox]:checked]:!bg-[url('data:image/svg+xml;utf8,<svg_xmlns=%22http://www.w3.org/2000/svg%22_viewBox=%220_0_24_24%22_fill=%22none%22_stroke=%22white%22_stroke-width=%223%22_stroke-linecap=%22round%22_stroke-linejoin=%22round%22><polyline_points=%2220_6_9_17_4_12%22/></svg>')] [&_input[type=checkbox]:checked]:!bg-center [&_input[type=checkbox]:checked]:!bg-no-repeat [&_input[type=checkbox]:checked]:!bg-[length:11px_11px]
+      [&_li:has(>input[type=checkbox])]:list-none [&_li:has(>input[type=checkbox])]:!pl-0 [&_li:has(>input[type=checkbox])]:!ml-[-1.25rem]
+      [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1
+      [&_.katex]:text-[1em]"
     >
       {segments.map((seg, idx) =>
         seg.kind === "think" ? (
           <details
             key={`think-${idx}`}
+            data-no-copy
             className="not-prose my-3 rounded-xl border border-violet-200/90 bg-gradient-to-b from-violet-50/90 to-slate-50/40 text-[14px] shadow-sm open:shadow-md"
           >
             <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-violet-900 marker:content-none [&::-webkit-details-marker]:hidden">
@@ -731,7 +1118,8 @@ function MessageContent({
             <div className="border-t border-violet-100/90 px-3 py-2.5 text-slate-700">
               {seg.body ? (
                 <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
+                  remarkPlugins={chatRemarkPlugins}
+                  rehypePlugins={chatRehypePlugins as never}
                   components={chatMarkdownComponents}
                 >
                   {seg.body}
@@ -744,7 +1132,8 @@ function MessageContent({
         ) : (
           <ReactMarkdown
             key={`md-${idx}`}
-            remarkPlugins={[remarkGfm]}
+            remarkPlugins={chatRemarkPlugins}
+            rehypePlugins={chatRehypePlugins as never}
             components={chatMarkdownComponents}
           >
             {seg.body}
@@ -759,6 +1148,7 @@ function MessageContent({
             <StreamingDots />
           </span>
         ))}
+      {!streaming && notice ? <AssistantTailNoticeBanner notice={notice} /> : null}
     </div>
   )
 }
@@ -802,6 +1192,12 @@ export default function ChatPage() {
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [resizingSidebar, setResizingSidebar] = useState(false)
   const sidebarWidthRef = useRef(280)
+
+  /** 助手消息里点开的图片 lightbox（消息中 <img> 通过 ChatLightboxCtx 触发） */
+  const [openedImage, setOpenedImage] = useState<{ src: string; alt?: string } | null>(null)
+  const openLightbox = useCallback((src: string, alt?: string) => {
+    setOpenedImage({ src, alt })
+  }, [])
 
   // ── 关联文章 ──────────────────────────────────────────────────────────────
   const [linkedTask, setLinkedTask] = useState<{ id: number; title: string; content: string } | null>(null)
@@ -863,13 +1259,15 @@ export default function ChatPage() {
     }
   }, [])
 
+  const sidebarAsideRef = useRef<HTMLDivElement>(null)
+
   // 加载侧栏宽度
   useEffect(() => {
     if (typeof window === "undefined") return
     const saved = localStorage.getItem("chat-sidebar-width")
     if (saved) {
       const n = parseInt(saved, 10)
-      if (!Number.isNaN(n) && n >= 220 && n <= 480) {
+      if (!Number.isNaN(n) && n >= 220 && n <= 520) {
         setSidebarWidth(n)
         sidebarWidthRef.current = n
       }
@@ -882,17 +1280,18 @@ export default function ChatPage() {
 
   const startResizingSidebar = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
+    const aside = sidebarAsideRef.current
     const startX = e.clientX
     const startW = sidebarWidthRef.current
     setResizingSidebar(true)
-    // 防止拖动时高亮文本/光标变形
     const prevUserSelect = document.body.style.userSelect
     const prevCursor = document.body.style.cursor
     document.body.style.userSelect = "none"
     document.body.style.cursor = "col-resize"
     const onMove = (ev: MouseEvent) => {
-      const next = Math.max(220, Math.min(480, startW + (ev.clientX - startX)))
-      setSidebarWidth(next)
+      const next = Math.max(220, Math.min(520, startW + (ev.clientX - startX)))
+      sidebarWidthRef.current = next
+      if (aside) aside.style.width = `${next}px`
     }
     const onUp = () => {
       document.removeEventListener("mousemove", onMove)
@@ -900,8 +1299,11 @@ export default function ChatPage() {
       document.body.style.userSelect = prevUserSelect
       document.body.style.cursor = prevCursor
       setResizingSidebar(false)
+      const w = sidebarWidthRef.current
+      setSidebarWidth(w)
+      if (aside) aside.style.width = `${w}px`
       try {
-        localStorage.setItem("chat-sidebar-width", String(sidebarWidthRef.current))
+        localStorage.setItem("chat-sidebar-width", String(w))
       } catch {}
     }
     document.addEventListener("mousemove", onMove)
@@ -1047,7 +1449,9 @@ export default function ChatPage() {
         content,
         model: null,
         created_at: new Date().toISOString(),
-        attachments: attachments?.length ? attachments : null,
+        attachments: attachments?.length
+          ? optimisticMessageAttachments(attachments)
+          : null,
       }
       const assistantMsg: DisplayMessage = {
         id: Date.now() + 1,
@@ -1191,7 +1595,19 @@ export default function ChatPage() {
   const handleLinkTask = useCallback(async (taskId: number, title: string) => {
     try {
       const detail = await tasksApi.get(taskId)
-      setLinkedTask({ id: taskId, title, content: detail.content ?? "" })
+      let content = (detail.content ?? "").trim()
+      if (!content && detail.segments?.length) {
+        content = [...detail.segments]
+          .sort((a, b) => a.index - b.index)
+          .map((s) => (s.content ?? "").trim())
+          .filter(Boolean)
+          .join("\n\n")
+      }
+      if (!content) {
+        window.alert("未能加载正文：请确认任务已生成完成，或稍后重试。")
+        return
+      }
+      setLinkedTask({ id: taskId, title, content })
       setTaskPickerOpen(false)
     } catch (e) {
       console.error(e)
@@ -1660,9 +2076,11 @@ export default function ChatPage() {
   )
 
   return (
+    <ChatLightboxCtx.Provider value={openLightbox}>
     <div className="flex h-[100dvh] w-full overflow-hidden bg-background">
       {/* 桌面侧栏（可拖动调整宽度） */}
       <aside
+        ref={sidebarAsideRef}
         className="relative hidden shrink-0 flex-col border-r border-sidebar-border bg-sidebar md:flex"
         style={{ width: `${sidebarWidth}px` }}
       >
@@ -1686,6 +2104,8 @@ export default function ChatPage() {
           onMouseDown={startResizingSidebar}
           onDoubleClick={() => {
             setSidebarWidth(280)
+            sidebarWidthRef.current = 280
+            if (sidebarAsideRef.current) sidebarAsideRef.current.style.width = "280px"
             try {
               localStorage.setItem("chat-sidebar-width", "280")
             } catch {}
@@ -1869,7 +2289,7 @@ export default function ChatPage() {
               </p>
             </div>
           ) : (
-            <div className="mx-auto w-full max-w-[860px] space-y-8 pb-8">
+            <div className="mx-auto w-full max-w-[min(100%,1400px)] space-y-8 pb-8">
               {messages.map((msg) => (
                 <div key={msg.id} className="group/msg">
                   {msg.role === "user" ? (
@@ -2033,7 +2453,7 @@ export default function ChatPage() {
 
         {/* 底部输入 */}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-background via-background/95 to-transparent pb-4 pt-10">
-          <div className="pointer-events-auto mx-auto w-full max-w-[860px] px-4">
+          <div className="pointer-events-auto mx-auto w-full max-w-[min(100%,1400px)] px-4">
             <div className="rounded-2xl border border-slate-200/90 bg-white p-2 shadow-lg shadow-slate-900/5">
               <input
                 ref={fileInputRef}
@@ -2417,6 +2837,14 @@ export default function ChatPage() {
         </AlertDialog>
       </div>
     </div>
+    {openedImage ? (
+      <ImageLightbox
+        src={openedImage.src}
+        alt={openedImage.alt}
+        onClose={() => setOpenedImage(null)}
+      />
+    ) : null}
+    </ChatLightboxCtx.Provider>
   )
 }
 

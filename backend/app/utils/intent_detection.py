@@ -35,10 +35,13 @@ _CHECK_KW = frozenset([
     "错别字", "逻辑问题", "全文审阅", "帮我查",
     "查一遍", "查一下", "核查", "帮我看看",
 ])
+# 注意：不要用过短的「增加/再加/多写」等子串——易与「增加悬念」「再加上时间线检查」
+# 「别多写废话」等纯审阅句叠加误判为复合意图；明确加字数走 _has_word_count_change_intent。
 _EXPAND_KW = frozenset([
     "扩写", "扩充", "加长", "加多", "增加字数", "字数不够",
     "太短", "写短了", "再多写", "写长一点", "写长些",
     "丰富一下", "详细一点", "详细些", "写详细",
+    "补足字数", "加字数",
 ])
 _REVISE_KW = frozenset([
     "修改", "改写", "重写", "改一下", "调整", "重新写",
@@ -95,6 +98,30 @@ def _detect_target_section(text: str) -> Optional[str]:
     return None
 
 
+def _has_word_count_change_intent(text: str) -> bool:
+    """
+    用户要加长 / 补足 / 增加若干字（未必含「扩写」一词）。
+    用于与「纯检查」区分：否则「适当增加…两千字…写完后检查」会误判为 is_check_request，
+    走审阅分支且把上一条助手消息（可能是上一份检查报告）当成正文来审。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    # 增加两千字、再加2000字、适当多写五百字、补足到8000字
+    if re.search(
+        r"(加|增|扩|补|多写|写够|凑够|补足).{0,28}([\d一二两三四五六七八九十百千万零]+)\s*字",
+        t,
+    ):
+        return True
+    # 两千字左右再加、5000字不够再扩
+    if re.search(
+        r"([\d一二两三四五六七八九十百千万零]+)\s*字.{0,18}(加|增|扩|补|多写)",
+        t,
+    ):
+        return True
+    return False
+
+
 def detect_intent_by_keywords(user_message: str) -> UserIntent:
     """
     纯关键词规则意图识别，零延迟，覆盖最常用场景。
@@ -125,6 +152,7 @@ def detect_intent_by_keywords(user_message: str) -> UserIntent:
             any(k in text for k in _EXPAND_KW)
             or any(k in text for k in _REVISE_KW)
             or any(k in text for k in _FULL_OUTPUT_KW)
+            or _has_word_count_change_intent(text)
         )
         if not has_other_writing_intent:
             return UserIntent(
@@ -148,7 +176,8 @@ def detect_intent_by_keywords(user_message: str) -> UserIntent:
     target = _detect_target_section(text)
 
     # 4. 扩写：尊重用户字数；用户没说就不强制 18000 字
-    if any(k in text for k in _EXPAND_KW):
+    # 「再加两千字」等未必含「扩写」一词，靠 _has_word_count_change_intent 一并归入 expand
+    if any(k in text for k in _EXPAND_KW) or _has_word_count_change_intent(text):
         return UserIntent(
             word_count_requirement=word_count,
             is_full_output=bool(word_count) or any(k in text for k in _FULL_OUTPUT_KW),

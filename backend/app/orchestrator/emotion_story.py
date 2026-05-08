@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import AsyncSessionLocal
+from app.database import AsyncSessionLocalWorker
 from app.models.segment import Segment
 from app.models.task import Task
 from app.models.task_event import TaskEvent
@@ -16,6 +16,7 @@ from app.prompts import render_prompt
 from app.redis_client import get_redis
 from app.services.llm import LLMClient, llm_client
 from app.services.key_pool import acquire_task_llm_key, release_lease, lease_heartbeat
+from app.services.article_review import ARTICLE_CHECK_BRIEF
 from app.utils.task_control import get_task_control
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ class EmotionStoryOrchestrator:
     # ─────────────────────────────────────────────────────────────────────
 
     async def run(self):
-        async with AsyncSessionLocal() as db:
+        async with AsyncSessionLocalWorker() as db:
             redis = await get_redis()
             result = await db.execute(
                 select(Task).where(Task.id == self.task_id).options(selectinload(Task.segments))
@@ -68,6 +69,23 @@ class EmotionStoryOrchestrator:
             task = result.scalar_one_or_none()
             if not task:
                 logger.error("Task %s not found", self.task_id)
+                return
+
+            # 已终态或需用户先处理的状态：勿抢占写稿 Key（也避免重复投递 run_story 时误跑正文）
+            if task.status in (
+                "cancelled",
+                "failed",
+                "review",
+                "approved",
+                "rejected",
+                "plan_review",
+                "paused",
+            ):
+                logger.info(
+                    "Task %s skip acquire (no pipeline run) | status=%s",
+                    self.task_id,
+                    task.status,
+                )
                 return
 
             lease = await acquire_task_llm_key(redis, db, task.user_id)
@@ -126,6 +144,15 @@ class EmotionStoryOrchestrator:
                 except (asyncio.CancelledError, Exception):
                     pass
                 await release_lease(redis, lease)
+                try:
+                    from app.celery_tasks.story import kick_queued_stories_for_user_async
+
+                    await kick_queued_stories_for_user_async(task.user_id)
+                except Exception:
+                    logger.exception(
+                        "kick_queued_stories_for_user_async failed after task=%s",
+                        self.task_id,
+                    )
 
     async def _run_pipeline(self, task: Task, db: AsyncSession, redis, api_key: str):
         if task.status in ("cancelled", "failed"):
@@ -180,6 +207,14 @@ class EmotionStoryOrchestrator:
         # ── Assemble ─────────────────────────────────────────────────────
         await db.refresh(task, attribute_names=["segments"])
         await self._assemble(task, db, redis)
+
+        # ── Auto review ──────────────────────────────────────────────────
+        # 成稿后立即跑一次 LLM 审阅，结果存到 task.auto_review_report；
+        # 失败静默跳过，不影响 status=review 的状态流转（_assemble 已落库）。
+        try:
+            await self._auto_review(task.id, task.content or "", api_key)
+        except Exception:
+            logger.exception("auto-review wrapper failed task=%s (silently ignored)", task.id)
 
     # ─────────────────────────────────────────────────────────────────────
     # Stage 1 – Plan
@@ -650,6 +685,50 @@ class EmotionStoryOrchestrator:
             "to": "review",
             "word_count": task.word_count,
         })
+
+    async def _auto_review(self, task_id: int, article_body: str, api_key: str) -> None:
+        """成稿后自动跑一次审阅，结果写入 task.auto_review_report。
+
+        - 失败：静默跳过（用户可在 UI 手动点「一键检查」重试）
+        - 不影响 status 流转
+        - 用独立 DB session（脱离 orchestrator 的 db）
+        """
+        if not article_body or not article_body.strip():
+            return
+        max_chars = 120_000
+        body = article_body if len(article_body) <= max_chars else article_body[:max_chars] + "\n\n[…正文已截断]"
+        try:
+            messages = [
+                {"role": "system", "content": ARTICLE_CHECK_BRIEF},
+                {"role": "user", "content": f"【整篇文章如下】\n---\n{body}\n---\n请开始审阅。"},
+            ]
+            result = await llm_client.complete(
+                api_key=api_key,
+                messages=messages,
+                model=settings.LLM_DEFAULT_MODEL,
+                max_tokens=16_000,
+                temperature=0.25,
+                read_timeout=900.0,
+            )
+            report = (result.content or "").strip()
+            if not report:
+                logger.info("auto-review empty report task=%s", task_id)
+                return
+            async with AsyncSessionLocalWorker() as db2:
+                t = (await db2.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
+                if t is None:
+                    return
+                t.auto_review_report = report
+                t.auto_review_model = result.model
+                t.auto_review_at = datetime.now(timezone.utc)
+                await db2.commit()
+            logger.info(
+                "auto-review ok task=%s report_len=%s model=%s",
+                task_id, len(report), result.model,
+            )
+        except Exception:
+            # 静默：不写 warning_msg，不影响主流程
+            logger.exception("auto-review failed task=%s (silently ignored)", task_id)
 
     # ─────────────────────────────────────────────────────────────────────
     # Utilities

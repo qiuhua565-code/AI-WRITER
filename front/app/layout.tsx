@@ -3,6 +3,8 @@ import { Inter, Merriweather } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { Providers } from '@/lib/providers'
 import './globals.css'
+import 'katex/dist/katex.min.css'
+import 'katex/dist/katex.min.css'
 
 const inter = Inter({ 
   subsets: ["latin"],

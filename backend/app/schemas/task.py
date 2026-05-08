@@ -79,6 +79,10 @@ class TaskDetailResponse(BaseModel):
     word_count: int | None
     error_msg: str | None
     warning_msg: str | None
+    # 自动审阅参考（仅用于前端展示，不参与导出）
+    auto_review_report: str | None = None
+    auto_review_model: str | None = None
+    auto_review_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

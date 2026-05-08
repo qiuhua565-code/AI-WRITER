@@ -62,6 +62,10 @@ export interface TaskDetail extends TaskListItem {
   outline?: Record<string, unknown> | null
   content?: string | null
   segments: SegmentInfo[]
+  /** 自动审阅参考（成稿后自动跑一次，仅用于前端展示，不参与导出） */
+  auto_review_report?: string | null
+  auto_review_model?: string | null
+  auto_review_at?: string | null
 }
 
 export interface StoryPlan {

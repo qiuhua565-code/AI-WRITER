@@ -37,6 +37,12 @@ class Task(Base):
     content: Mapped[str | None] = mapped_column(Text)
     word_count: Mapped[int | None] = mapped_column(Integer)
 
+    # 自动审阅（由 orchestrator 在 _assemble 完成后 fire-and-forget 跑一次写入）
+    # 仅在前端「AI 审阅参考」折叠区展示，不参与导出 / 不影响成稿正文
+    auto_review_report: Mapped[str | None] = mapped_column(Text)
+    auto_review_model: Mapped[str | None] = mapped_column(Text)
+    auto_review_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
     # 进度展示（实时维护）
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 0-100

@@ -331,6 +331,22 @@ async def review_chat(
         "rewrite": "请对以下文字进行重写，在保持核心情节的基础上，换一种表达方式：\n\n{text}",
     }
 
+    # ── 全文输出意图识别 ──────────────────────────────────────────────────────
+    # 用户在 AI 辅助里改了若干段后，常说「直接生成全文」让助手把所有修改后的版本
+    # 完整出一遍。LLM 在长篇输出时容易省略（写「[第N章保持不变]」之类的占位符），
+    # 我们识别这种意图后，在 system prompt 末尾追加强约束，并把 max_tokens 提高。
+    _FULL_ARTICLE_OUTPUT_KW = (
+        "直接生成全文", "生成全文", "输出完整全文", "完整全文输出",
+        "完整版输出", "整篇输出", "全文输出", "整理出完整全文",
+        "整理完整版", "把修改应用到全文", "把修改应用到正文",
+        "整篇都给我", "整篇文章重新", "完整版本",
+    )
+    _user_text_for_intent = (body.message or "").strip()
+    is_full_article_output = (
+        bool(_user_text_for_intent)
+        and any(kw in _user_text_for_intent for kw in _FULL_ARTICLE_OUTPUT_KW)
+    )
+
     # Build system prompt with article context
     system = f"你是一个专业的情感故事写作助手。以下是当前文章的完整内容，请根据用户的要求进行辅助：\n\n---\n{task.content or '（文章内容暂未生成）'}\n---"
 
@@ -375,6 +391,22 @@ async def review_chat(
         "用户也可在助手回复后点击「智能应用到正文」，由系统根据对话在全文中匹配替换。"
     )
 
+    if is_full_article_output:
+        # 全文输出场景的强制约束：必须吐出完整稿，不允许任何形式的省略
+        system += (
+            "\n\n========= 当前任务：完整输出修改后的全文 =========\n"
+            "用户希望拿到一份**完整可保存**的全文。**必须严格遵守**：\n"
+            "- ❌ 严禁出现「[第N章保持不变]」「（此处省略）」「（无修改部分略）」"
+            "「以下章节同上文」等任何形式的占位符或省略描述\n"
+            "- ❌ 严禁只输出修改过的部分；不要回复「以下是修改后的章节」就停止\n"
+            "- ❌ 严禁先描述「我对哪几章做了修改」再贴片段；用户要的是直接可用的完整稿\n"
+            "- ✅ 必须从标题开始，按章节顺序，把每一段每一字都输出出来\n"
+            "- ✅ 已和你在前面对话讨论确认过的修改：使用修改后的版本\n"
+            "- ✅ 没改过的章节：原样复制，不要再润色或精简\n"
+            "- ✅ 直接进入正文输出，不要写「好的」「以下是完整版」等开场白"
+        )
+
+
     # Build user message
     if body.action and body.action in ACTION_PROMPTS and body.selected_text:
         user_content = ACTION_PROMPTS[body.action].format(text=body.selected_text)
@@ -386,8 +418,21 @@ async def review_chat(
         {"role": "user", "content": user_content},
     ]
 
+    # 全文输出意图：max_tokens 提到 16k 装得下完整成稿；temperature 降到 0.3 抑制自由发挥
+    max_tokens = 16_000 if is_full_article_output else 2_000
+    temperature = 0.3 if is_full_article_output else 0.75
+
     return StreamingResponse(
-        _review_chat_generator(request, task_id, current_user.id, api_key, messages, settings.LLM_DEFAULT_MODEL),
+        _review_chat_generator(
+            request,
+            task_id,
+            current_user.id,
+            api_key,
+            messages,
+            settings.LLM_DEFAULT_MODEL,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -420,7 +465,17 @@ async def _persist_review_chat(task_id: int, content: str, model: str) -> None:
         )
 
 
-async def _review_chat_generator(request: Request, task_id: int, user_id: int, api_key: str, messages: list, model: str):
+async def _review_chat_generator(
+    request: Request,
+    task_id: int,
+    user_id: int,
+    api_key: str,
+    messages: list,
+    model: str,
+    *,
+    max_tokens: int = 2000,
+    temperature: float = 0.75,
+):
     from app.services.llm import llm_client
 
     full_response: list[str] = []
@@ -428,7 +483,7 @@ async def _review_chat_generator(request: Request, task_id: int, user_id: int, a
     client_disconnected = False
     try:
         yield ": connected\n\n"
-        async for chunk in llm_client.stream(api_key=api_key, messages=messages, model=model, max_tokens=2000, temperature=0.75):
+        async for chunk in llm_client.stream(api_key=api_key, messages=messages, model=model, max_tokens=max_tokens, temperature=temperature):
             if await request.is_disconnected():
                 client_disconnected = True
                 break
@@ -462,19 +517,7 @@ async def _review_chat_generator(request: Request, task_id: int, user_id: int, a
             await best_effort_wait(persist_task, timeout=5.0, label=f"review-chat-persist task={task_id}")
 
 
-_ARTICLE_CHECK_BRIEF = """你是资深网文与新媒体故事审校。请通读用户给出的【整篇文章】（虚构创作），按下列维度逐项检查，输出 Markdown 报告（## 小节 + 要点列表）。某项若无问题可写「未见明显问题」。
-
-1. 称谓、人称是否前后一致、有无明显错误
-2. 情节逻辑是否自洽，有无明显不合理之处
-3. 故事内时间安排是否合理，有无不可能发生的时间线
-4. 「免费部分」与「付费卡点/悬念」衔接是否自然；免费段是否过早泄露悬疑答案
-5. 是否有强烈暗示导致付费前剧透感
-6. 字数与节奏（是否明显偏短或拖沓；若配置有目标字数可对比）
-7. 重复句、反复表达、相似段落、无效描写、暗示性剧透情节
-8. 真实地名、精确日期（如「2025年x月x日」）、真实人名；国内过于具体的小地名（如北京某具体路名/小区名等）——列出建议删除或虚化的原文短语引用
-9. 分段是否合理；大段未分段处请指出位置并给出拆段建议（不要在此全文改写，仅审阅与建议）
-
-保持客观可执行；不对用户做道德说教；本文为用户商业创作审阅场景。"""
+from app.services.article_review import ARTICLE_CHECK_BRIEF as _ARTICLE_CHECK_BRIEF
 
 
 @router.post("/{task_id}/article-check")

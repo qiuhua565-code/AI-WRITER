@@ -21,13 +21,6 @@ async def get_redis() -> aioredis.Redis:
     return _redis_pool
 
 
-def reset_redis_pool():
-    """Celery worker 重新连接时调用，强制重建连接池。"""
-    global _redis_pool
-    _redis_pool = None
-
-
-
 def reset_redis_pool() -> None:
     """每个 Celery 任务调用 asyncio.run() 前调用，确保 Redis 客户端在新的事件循环里重建。"""
     global _redis_pool

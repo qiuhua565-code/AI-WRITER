@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { flushSync } from "react-dom"
 import { useRouter } from "next/navigation"
-import { useQueryClient } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { diffWords } from "diff"
 import {
   ArrowLeft,
@@ -47,7 +47,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { cn } from "@/lib/utils"
-import { TaskDetail } from "@/lib/types"
+import { TaskDetail, TaskListItem } from "@/lib/types"
 import { tasksApi } from "@/lib/api"
 
 interface ArticleEditorProps {
@@ -80,6 +80,14 @@ const segmentLabels: Record<string, string> = {
   chapter_11: "第十一章",
   chapter_12: "第十二章",
   epilogue:   "尾声",
+}
+
+/** 侧栏「AI 检测参考」视图，非数据库 segment_type */
+const PANEL_AUTO_REVIEW = "__auto_review__"
+
+function segmentForApi(active: string | null): string | undefined {
+  if (!active || active === PANEL_AUTO_REVIEW) return undefined
+  return active
 }
 
 const STAGES = [
@@ -133,6 +141,10 @@ function getToken(): string | null {
   }
 }
 
+function taskArticleHref(t: TaskListItem): string {
+  return t.status === "plan_review" ? `/dashboard/article/${t.id}/plan` : `/dashboard/article/${t.id}`
+}
+
 /** 按 SSE 规范解析单个事件块（由空行分隔），忽略注释行 `: ...` */
 function parseSseEventBlock(block: string): { event: string; data: string } | null {
   const lines = block.replace(/\r/g, "").split("\n")
@@ -158,10 +170,27 @@ function parseSseEventBlock(block: string): { event: string; data: string } | nu
 export function ArticleEditor({ task }: ArticleEditorProps) {
   const router = useRouter()
   const queryClient = useQueryClient()
+  const { data: sidebarTasksData } = useQuery({
+    queryKey: ["tasks"],
+    queryFn: () => tasksApi.list({ page_size: 20 }),
+    staleTime: 8_000,
+    refetchInterval: (q) => {
+      const items = q.state.data?.items ?? []
+      return items.some((x) => x.status === "queued" || x.status === "writing") ? 4_000 : 20_000
+    },
+  })
+  const sidebarTasksItems = sidebarTasksData?.items ?? []
   const [showApproveDialog, setShowApproveDialog] = useState(false)
   const [isApproving, setIsApproving] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [activeSegment, setActiveSegment] = useState<string | null>(null)
+
+  // 侧栏仅「全文 / 检测参考」时，切换任务需清掉旧的「章节」选中态
+  useEffect(() => {
+    setActiveSegment((prev) =>
+      prev === null || prev === PANEL_AUTO_REVIEW ? prev : null
+    )
+  }, [task.id])
 
   // Editable content (local copy for in-place edits)
   const [editableContent, setEditableContent] = useState<string>(task.content ?? "")
@@ -403,7 +432,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
           message: userContent,
           selected_text: selectedText,
           action,
-          segment_type: activeSegment || undefined,
+          segment_type: segmentForApi(activeSegment),
         }),
         signal: controller.signal,
       })
@@ -680,7 +709,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
           body: JSON.stringify({
             user_message: userMsg,
             assistant_reply: asst.content,
-            segment_type: activeSegment || undefined,
+            segment_type: segmentForApi(activeSegment),
           }),
         })
         const data = (await res.json().catch(() => ({}))) as {
@@ -824,6 +853,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
   }
 
   const displayContent = () => {
+    if (activeSegment === PANEL_AUTO_REVIEW) return ""
     if (activeSegment) {
       return task.segments.find((s) => s.segment_type === activeSegment)?.content ?? ""
     }
@@ -935,11 +965,22 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
 
       {isReviewable && activeSegment && (
         <div className="border-b border-sky-100 bg-gradient-to-r from-sky-50/90 to-white px-6 py-2.5 text-[13px] text-sky-950">
-          <span className="font-medium">本章预览：</span>
-          {segmentLabels[activeSegment] ?? activeSegment}
-          <span className="ml-2 text-sky-800/85">
-            打开「AI 改稿」时，会将本章正文一并提供给模型，便于按章修改。
-          </span>
+          {activeSegment === PANEL_AUTO_REVIEW ? (
+            <>
+              <span className="font-medium">AI 检测参考：</span>
+              <span className="ml-2 text-sky-800/85">
+                成稿后自动生成的审阅报告，仅供参考，不写入正文、不随 Word 导出。
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="font-medium">本章预览：</span>
+              {segmentLabels[activeSegment] ?? activeSegment}
+              <span className="ml-2 text-sky-800/85">
+                打开「AI 改稿」时，会将本章正文一并提供给模型，便于按章修改。
+              </span>
+            </>
+          )}
         </div>
       )}
 
@@ -952,70 +993,125 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
       {/* Body */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left sidebar */}
-        <div className="w-52 shrink-0 border-r border-border bg-muted/30 overflow-y-auto">
-          <div className="border-b border-border px-4 py-3">
+        <div className="flex w-52 shrink-0 flex-col border-r border-border bg-muted/30">
+          <div className="shrink-0 border-b border-border px-4 py-3">
             <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <Layers className="h-4 w-4 text-primary" />
               {isWriting ? "生成进度" : "内容结构"}
             </h2>
           </div>
 
-          {isWriting ? (
-            // Stage progress panel
-            <nav className="space-y-1 p-3">
-              {STAGES.map(stage => {
-                const st: StageStatus = stages[stage.key] ?? "waiting"
-                return (
-                  <div key={stage.key} className="flex items-center gap-2 rounded-lg px-3 py-2">
-                    <span className={cn("flex h-5 w-5 items-center justify-center rounded-full text-xs", {
-                      "bg-muted text-muted-foreground": st === "waiting",
-                      "bg-primary/10 text-primary": st === "writing",
-                      "bg-emerald-500/10 text-emerald-600": st === "done",
-                      "bg-destructive/10 text-destructive": st === "failed",
-                    })}>
-                      {st === "writing" ? <Loader2 className="h-3 w-3 animate-spin" /> :
-                       st === "done" ? <CheckCircle className="h-3 w-3" /> :
-                       st === "failed" ? <XCircle className="h-3 w-3" /> :
-                       <span className="h-1.5 w-1.5 rounded-full bg-current" />}
-                    </span>
-                    <span className={cn("text-sm", {
-                      "text-muted-foreground": st === "waiting",
-                      "text-primary font-medium": st === "writing",
-                      "text-foreground": st === "done",
-                      "text-destructive": st === "failed",
-                    })}>
-                      {stage.label}
-                    </span>
-                  </div>
-                )
-              })}
-            </nav>
-          ) : (
-            // Segment navigator
-            <nav className="space-y-1 p-3">
-              <button
-                onClick={() => setActiveSegment(null)}
-                className={cn(
-                  "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                  !activeSegment ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-                )}
-              >
-                完整文章
-              </button>
-              {task.segments.map(seg => (
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {isWriting ? (
+              // Stage progress panel
+              <nav className="space-y-1 p-3">
+                {STAGES.map(stage => {
+                  const st: StageStatus = stages[stage.key] ?? "waiting"
+                  return (
+                    <div key={stage.key} className="flex items-center gap-2 rounded-lg px-3 py-2">
+                      <span className={cn("flex h-5 w-5 items-center justify-center rounded-full text-xs", {
+                        "bg-muted text-muted-foreground": st === "waiting",
+                        "bg-primary/10 text-primary": st === "writing",
+                        "bg-emerald-500/10 text-emerald-600": st === "done",
+                        "bg-destructive/10 text-destructive": st === "failed",
+                      })}>
+                        {st === "writing" ? <Loader2 className="h-3 w-3 animate-spin" /> :
+                         st === "done" ? <CheckCircle className="h-3 w-3" /> :
+                         st === "failed" ? <XCircle className="h-3 w-3" /> :
+                         <span className="h-1.5 w-1.5 rounded-full bg-current" />}
+                      </span>
+                      <span className={cn("text-sm", {
+                        "text-muted-foreground": st === "waiting",
+                        "text-primary font-medium": st === "writing",
+                        "text-foreground": st === "done",
+                        "text-destructive": st === "failed",
+                      })}>
+                        {stage.label}
+                      </span>
+                    </div>
+                  )
+                })}
+              </nav>
+            ) : (
+              // Segment navigator
+              <nav className="space-y-1 p-3">
                 <button
-                  key={seg.id}
-                  onClick={() => setActiveSegment(seg.segment_type)}
+                  onClick={() => setActiveSegment(null)}
                   className={cn(
                     "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                    activeSegment === seg.segment_type ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                    !activeSegment ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                   )}
                 >
-                  <div>{segmentLabels[seg.segment_type] ?? seg.title}</div>
-                  <div className="mt-0.5 text-xs opacity-70">{seg.word_count} 字</div>
+                  完整文章
                 </button>
-              ))}
-            </nav>
+                {isReviewable && task.auto_review_report?.trim() ? (
+                  <button
+                    type="button"
+                    onClick={() => setActiveSegment(PANEL_AUTO_REVIEW)}
+                    className={cn(
+                      "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                      activeSegment === PANEL_AUTO_REVIEW
+                        ? "bg-violet-600 text-white shadow-sm"
+                        : "border border-violet-200/80 bg-violet-50/80 text-violet-950 hover:bg-violet-100/90"
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5 font-medium">
+                      <Sparkles className="h-3.5 w-3.5 shrink-0 opacity-90" />
+                      AI 检测参考
+                    </div>
+                    <div
+                      className={cn(
+                        "mt-0.5 text-[11px] leading-snug opacity-90",
+                        activeSegment === PANEL_AUTO_REVIEW ? "text-white/85" : "text-violet-800/85"
+                      )}
+                    >
+                      自动审阅报告（正文内的章节标题仍保留原样）
+                    </div>
+                  </button>
+                ) : null}
+              </nav>
+            )}
+          </div>
+
+          {!isWriting && sidebarTasksItems.length > 0 && (
+            <div className="flex max-h-[40vh] shrink-0 flex-col border-t border-border bg-background/70">
+              <div className="flex items-center gap-1.5 border-b border-border/80 px-3 py-2">
+                <ListChecks className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="text-[11px] font-semibold tracking-tight text-muted-foreground">我的任务</span>
+              </div>
+              <ScrollArea className="min-h-0 flex-1">
+                <div className="space-y-1 p-2 pr-3 pb-1">
+                  {sidebarTasksItems.map((t) => (
+                    <Link
+                      key={t.id}
+                      href={taskArticleHref(t)}
+                      className={cn(
+                        "block rounded-md border border-transparent px-2 py-1.5 transition-colors hover:bg-muted/80",
+                        t.id === task.id && "border-primary/35 bg-primary/8"
+                      )}
+                    >
+                      <div className="line-clamp-2 text-[11px] leading-snug text-foreground">
+                        {t.title || `任务 #${t.id}`}
+                      </div>
+                      <Badge
+                        variant="secondary"
+                        className={cn(
+                          "mt-1 h-5 max-w-full truncate px-1.5 text-[10px] font-normal",
+                          statusConfig[t.status]?.color
+                        )}
+                      >
+                        {statusConfig[t.status]?.label ?? t.status}
+                      </Badge>
+                    </Link>
+                  ))}
+                </div>
+              </ScrollArea>
+              <div className="shrink-0 border-t border-border/70 px-2 py-1.5 text-center">
+                <Link href="/dashboard" className="text-[10px] font-medium text-primary hover:underline">
+                  打开任务列表
+                </Link>
+              </div>
+            </div>
           )}
         </div>
 
@@ -1064,19 +1160,51 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                 </pre>
               </div>
             ) : (
-              isReviewable && !activeSegment ? (
-                <textarea
-                  className="w-full resize-none whitespace-pre-wrap font-serif text-base leading-8 text-foreground bg-transparent outline-none"
-                  style={{ minHeight: 'calc(100vh - 10rem)' }}
-                  value={editableContent}
-                  onChange={e => { setEditableContent(e.target.value); setHasUnsaved(true) }}
-                  spellCheck={false}
-                />
-              ) : (
-                <pre className="whitespace-pre-wrap font-serif text-base leading-8 text-foreground">
-                  {displayContent() || "（暂无内容）"}
-                </pre>
-              )
+              <>
+                {activeSegment === PANEL_AUTO_REVIEW ? (
+                  <div className="mx-auto max-w-3xl space-y-4 pb-8">
+                    <div className="flex flex-wrap items-center gap-2 border-b border-violet-100 pb-3 text-sm">
+                      <Sparkles className="h-4 w-4 text-violet-600" />
+                      <span className="font-semibold text-violet-950">AI 审阅参考</span>
+                      <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] text-violet-800">
+                        仅供参考 · 不导出
+                      </span>
+                      {task.auto_review_at ? (
+                        <span className="ml-auto text-[11px] text-violet-600/85">
+                          {new Date(task.auto_review_at).toLocaleString("zh-CN", {
+                            month: "numeric",
+                            day: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                          {task.auto_review_model ? ` · ${task.auto_review_model}` : ""}
+                        </span>
+                      ) : null}
+                    </div>
+                    {task.auto_review_report?.trim() ? (
+                      <ScrollArea className="h-[calc(100vh-11rem)] rounded-xl border border-violet-100/90 bg-gradient-to-b from-violet-50/50 to-background pr-3">
+                        <pre className="whitespace-pre-wrap p-5 font-serif text-[14px] leading-7 text-slate-700">
+                          {task.auto_review_report}
+                        </pre>
+                      </ScrollArea>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">暂无自动生成审阅内容，请稍后刷新页面。</p>
+                    )}
+                  </div>
+                ) : isReviewable && !activeSegment ? (
+                  <textarea
+                    className="w-full resize-none whitespace-pre-wrap font-serif text-base leading-8 text-foreground bg-transparent outline-none"
+                    style={{ minHeight: 'calc(100vh - 10rem)' }}
+                    value={editableContent}
+                    onChange={e => { setEditableContent(e.target.value); setHasUnsaved(true) }}
+                    spellCheck={false}
+                  />
+                ) : (
+                  <pre className="whitespace-pre-wrap font-serif text-base leading-8 text-foreground">
+                    {displayContent() || "（暂无内容）"}
+                  </pre>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -1192,7 +1320,11 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                 <div className="min-w-0 flex-1">
                   <SheetTitle className="text-base font-semibold text-slate-900">AI 改稿</SheetTitle>
                   <p className="mt-1 text-[12px] font-normal leading-snug text-slate-500">
-                    {activeSegment ? (
+                    {activeSegment === PANEL_AUTO_REVIEW ? (
+                      <>
+                        当前为「AI 审阅参考」页；改稿对话仍按<strong>全文</strong>提供上下文。若需按章修改请先点左侧章节。
+                      </>
+                    ) : activeSegment ? (
                       <>
                         已附带「{segmentLabels[activeSegment] ?? activeSegment}」作上下文；描述想怎么改即可。
                         助手回复后可试「智能应用到正文」自动匹配全文替换。

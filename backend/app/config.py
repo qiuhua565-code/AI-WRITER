@@ -11,6 +11,9 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/aistoryflow"
+    # FastAPI 进程连接池（多 worker 时每进程一套池；总连接 ≈ workers × (DB_POOL_SIZE + DB_MAX_OVERFLOW)）
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

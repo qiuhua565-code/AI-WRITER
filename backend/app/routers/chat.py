@@ -36,6 +36,46 @@ from app.utils.async_persist import spawn_persist_task, best_effort_wait
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
+# 对话默认 system：减少「模拟界面 / 断网 Banner」类问题被模型习惯性打成整页 HTML/CSS 代码块。
+AI_STORYFLOW_CHAT_SYSTEM = (
+    "你是 AI-StoryFlow 的写作与产品助手。\n\n"
+    "当用户问的是**本产品界面会怎样表现**（断网、停止生成、保存失败、Banner 颜色与文案、"
+    "点击图片全屏等），或让你「模拟」某种交互时：请用简洁中文分条说明**用户会看到什么、"
+    "提示条的大致样式与原文案**即可；像说明产品行为一样回答，不要默认给出整页 HTML/CSS/"
+    "独立网页 Demo，除非对方明确写「给代码」「写 HTML」「要可运行示例」等。\n\n"
+    "**普通问答**（常识、解释概念、写作技巧、资料整理等）按用户问题正常作答即可。\n\n"
+    "**续写、润色、审稿、大纲、标题等创作类任务**须按用户要求完整输出正文或 Markdown（标题、列表、"
+    "引用等）；仅避免与写作无关的冗长代码块；用户若明确要代码或小段示例仍可给出。"
+)
+
+
+_MAX_LINKED_ARTICLE_CHARS = 120_000
+
+
+def _messages_for_chat_llm(msgs: list[dict], editor_content: str = "") -> list[dict]:
+    """为流式对话注入 system；可选带上「关联文章」全文供模型改稿/摘要/引用。"""
+    body: list[dict] = []
+    for m in msgs:
+        if m.get("role") == "system":
+            continue
+        body.append(m)
+    sys_text = AI_STORYFLOW_CHAT_SYSTEM
+    ec = (editor_content or "").strip()
+    if ec:
+        if len(ec) > _MAX_LINKED_ARTICLE_CHARS:
+            ec = ec[:_MAX_LINKED_ARTICLE_CHARS] + (
+                f"\n\n[…关联正文已截断至前 {_MAX_LINKED_ARTICLE_CHARS} 字]"
+            )
+        sys_text = (
+            f"{sys_text}\n\n---\n【用户当前关联的成稿全文】\n"
+            "以下为写作任务生成的正文（用户在「AI 对话」里通过「关联文章」挂载）。"
+            "用户可能要求摘要、查找情节、引用段落、局部改写、输出全文等，请严格基于下文作答。"
+            "若用户未要求修改正文，不要随意改写或覆盖全文。\n\n"
+            f"{ec}"
+        )
+    return [{"role": "system", "content": sys_text}, *body]
+
+
 MAX_CHAT_ATTACHMENTS = 8
 MAX_SINGLE_ATTACHMENT_BYTES = 6 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024
@@ -642,7 +682,7 @@ async def stream_chat(
             raise HTTPException(status_code=404, detail="会话不存在")
 
         _validate_attachment_parts(body.attachments)
-        mat = _materialize_user_message(body)
+        mat = await asyncio.to_thread(_materialize_user_message, body)
         if (
             not mat.display_text.strip()
             and not mat.mm_attachments
@@ -960,6 +1000,66 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                             "📝 Check request | article_len=%d | history dropped | session=%s",
                             len(article_to_check), session_id,
                         )
+                    elif user_intent and user_intent.is_continue_request:
+                        # 用户在中断后说「继续完成」之类。模型直接看 history 时常出现两种偏差：
+                        #   a) partial 较长（已写到中段）→ 模型从头重写一遍，重复浪费 token
+                        #   b) partial 较短（只写了标题/声明）→ 模型不知道这是被截断的「开头」，
+                        #      处理方式不一：可能续上、可能照搬。
+                        # 我们按 partial 的长度选择**轻指令**或**严格指令**，避免一刀切。
+                        last_assistant_content = ""
+                        for hist_msg in reversed(base_messages[:-1]):
+                            if hist_msg.get("role") == "assistant":
+                                hc = hist_msg.get("content", "")
+                                if isinstance(hc, str) and hc.strip():
+                                    last_assistant_content = hc
+                                    break
+                        if last_assistant_content:
+                            prev_len = len(last_assistant_content)
+                            user_request_clean = (user_request or "继续完成上文未写完的部分。").strip()
+
+                            # 阈值经验值：< 600 字符通常说明只是开了个头（标题+声明 ~150 字、
+                            # 加上引子开头一两段 ~600 字），允许模型沿用并补全；
+                            # >= 600 字符 大概率已进入正文，需要严格续接而非重写。
+                            if prev_len < 600:
+                                explicit_continue = (
+                                    "【任务：基于上文开头继续完成全文】\n"
+                                    f"上一条助手回复因用户主动中断而提前停止，已经写了 {prev_len} 字（属于较短的开头）：\n"
+                                    f"「{last_assistant_content}」\n\n"
+                                    "请基于上面这个开头**直接继续完成全文**：\n"
+                                    "- ✅ 你可以沿着这个开头自然往下展开（推荐做法），上面用户已经能看到了\n"
+                                    "- ✅ 如果用户在下方有补充指令（风格、字数等），按指令调整\n"
+                                    "- ⚠️ 如果你打算保留上面那段开头，**不要把它一字不差地重新输出一遍**——那样会让用户屏幕上出现两份重复的开头\n"
+                                    "- ⚠️ 如果你确实需要重写开头，请明确说明「重新版本如下」并继续写完整个故事\n\n"
+                                    "用户最新指令原文：\n"
+                                    f"{user_request_clean}"
+                                )
+                                continue_mode = "soft-head"
+                            else:
+                                tail_anchor = last_assistant_content[-200:]
+                                explicit_continue = (
+                                    "【任务：从中断处继续】\n"
+                                    f"上一条助手回复因用户主动中断而提前停止，已写约 {prev_len} 字。末尾内容是：\n"
+                                    f"「…{tail_anchor}」\n\n"
+                                    "请你接着这个末尾**自然衔接**地继续写下去：\n"
+                                    "- ✅ 你输出的第一句必须直接续接上文末尾，仿佛中间没有中断过\n"
+                                    "- ✅ 如果用户在下方有具体补充指令（风格调整、剧情走向等），请按指令调整后再继续写\n"
+                                    "- ❌ 不要重复任何已经出现过的句子或段落\n"
+                                    "- ❌ 不要写「接下来我将继续」「让我继续」之类的开场白\n\n"
+                                    "用户最新指令原文：\n"
+                                    f"{user_request_clean}"
+                                )
+                                continue_mode = "strict-tail"
+                            msgs = list(base_messages[:-1]) + [
+                                {"role": "user", "content": explicit_continue}
+                            ]
+                            logger.info(
+                                "📝 Explicit continue | session=%s | mode=%s | prev_len=%d",
+                                session_id, continue_mode, prev_len,
+                            )
+                        else:
+                            # 没有可续接的助手历史，按普通起始处理
+                            msgs = base_messages
+                            logger.info("📤 Continue intent but no prior assistant | session=%s", session_id)
                     else:
                         msgs = base_messages
                         logger.info("📤 Initial request | session=%s | seg=%d", session_id, seg_idx)
@@ -973,21 +1073,22 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                         }
                     ]
                 else:
-                    # 使用智能续写提示
-                    continue_prompt = generate_continue_prompt(
-                        accumulated_text=accumulated,
-                        required_words=user_intent.word_count_requirement if user_intent else None,
-                        user_intent=user_intent,
-                    )
+                    # 自动续写循环：用 Anthropic 的 assistant prefill 模式 —— messages 最后一条
+                    # 是 assistant 时，模型会从该 content 直接续写，而不会把它当成"对话轮次回应"。
+                    #
+                    # 关键好处：此模式下，LLM 视角中"最近的 user 消息"仍是用户原始详细指令
+                    # （扣题、分段、字数、风格等），不会被项目 hardcoded 的「请继续...」prompt 稀释。
+                    # 这解决了用户反映的「续写后 LLM 自由发挥、忘记最初约束」的问题。
+                    #
+                    # 字数控制由后续 should_continue_for_word_count 在外层守住，无需再插入指令。
+                    msgs = list(base_messages) + [
+                        {"role": "assistant", "content": accumulated},
+                    ]
                     logger.info(
-                        "➕ Continue request | session=%s | seg=%d | current_words=%d | required=%s",
+                        "➕ Continue (prefill) | session=%s | seg=%d | current_words=%d | required=%s",
                         session_id, seg_idx, count_words(accumulated),
                         user_intent.word_count_requirement if user_intent else "None"
                     )
-                    msgs = list(base_messages) + [
-                        {"role": "assistant", "content": accumulated},
-                        {"role": "user", "content": continue_prompt},
-                    ]
 
                 logger.info(
                     "🚀 LLM Stream Starting | session=%s | seg=%d | model=%s | max_tokens=%d | api_key=%s...%s",
@@ -999,14 +1100,19 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                 round_finish: str | None = None
                 round_parts: list[str] = []
 
+                # 唯一化 tag：sess<id>-seg<n>-r<retry>-<unix_ms>。下发到 LLM 的 metadata.user_id，
+                # 防止中转站对相同 messages 做"无脑缓存"返回旧响应（这是用户反馈"换对话框输出
+                # 一模一样"最常见的根因之一）。
+                request_tag = f"sess{session_id}-seg{seg_idx}-r{retry_count}-{int(time.time()*1000)}"
                 async for item in _merge_llm_stream_with_heartbeats(
                     request,
                     llm_client.stream(
                         api_key=api_key,
-                        messages=msgs,
+                        messages=_messages_for_chat_llm(msgs, editor_content),
                         model=model,
                         max_tokens=settings.LLM_CHAT_MAX_OUTPUT_TOKENS,
                         temperature=0.7,
+                        request_tag=request_tag,
                     ),
                     heartbeat_interval,
                     log_session_id=session_id,
@@ -1063,9 +1169,17 @@ async def _chat_generator(request: Request, session_id: int, api_key: str, messa
                     should_continue = False
                     reason = "check request: single-shot, no continuation"
                 else:
+                    # 设计取舍：不再用「字数不足」驱动续写。即使用户在指令里写了「大约 6000 字」，
+                    # 也只让 LLM 自己负责长度——LLM 写完一段说停就停，不再追着补字数。
+                    # 这样可以杜绝用户觉得「答非所问 / 越写越偏」的问题（项目自动注入的续写
+                    # prompt 会稀释用户原始约束）。
+                    #
+                    # 仅保留 max_tokens 截断场景下的续写：避免 LLM 句子被硬截断半句话。
+                    # 这点通过 required_words=None 后 should_continue_for_word_count 的
+                    # 默认分支自动保住（finish_reason=max_tokens/length 时 return True）。
                     should_continue, reason = should_continue_for_word_count(
                         accumulated_text=accumulated,
-                        required_words=user_intent.word_count_requirement if user_intent else None,
+                        required_words=None,
                         finish_reason=round_finish,
                         segment_index=seg_idx,
                         max_segments=max_segments,

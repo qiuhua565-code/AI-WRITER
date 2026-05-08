@@ -74,13 +74,38 @@ class LLMClient:
         max_tokens: int = 8000,
         temperature: float = 0.85,
         response_format: dict | None = None,
+        request_tag: str | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         use_model = model or settings.LLM_DEFAULT_MODEL
         logger.warning(
-            "📤 LLM Stream Request | model=%s | max_tokens=%d | temp=%.2f | msg_count=%d",
-            use_model, max_tokens, temperature, len(messages)
+            "📤 LLM Stream Request | model=%s | max_tokens=%d | temp=%.2f | msg_count=%d | tag=%s",
+            use_model, max_tokens, temperature, len(messages), request_tag or "-",
         )
         system, chat_messages = _split_messages(messages)
+
+        # 按需打印 messages 摘要（每条 role + 前 200 字），便于排查
+        # 「LLM 不按用户标题写 / 多次输出几乎一致」之类问题——日志里能直接核对
+        # 实际送到 LLM 的 prompt 是否每次都不同。
+        if logger.isEnabledFor(logging.INFO):
+            for idx, m in enumerate(chat_messages):
+                content = m.get("content", "")
+                preview = ""
+                if isinstance(content, str):
+                    preview = content
+                elif isinstance(content, list):
+                    for blk in content:
+                        if isinstance(blk, dict) and blk.get("type") == "text":
+                            preview = blk.get("text", "")
+                            break
+                preview = (preview or "").replace("\n", " ")[:200]
+                logger.info(
+                    "📨 LLM msg[%d] role=%s len=%d preview=%s",
+                    idx, m.get("role"), len(preview), preview,
+                )
+            if system:
+                sys_preview = system.replace("\n", " ")[:200] if isinstance(system, str) else str(system)[:200]
+                logger.info("📨 LLM system len=%d preview=%s", len(system) if isinstance(system, str) else 0, sys_preview)
+
         client = self._client(api_key, _STREAM_TIMEOUT)
 
         kwargs = dict(
@@ -91,6 +116,11 @@ class LLMClient:
         )
         if system:
             kwargs["system"] = system
+
+        # 给 Anthropic 透传 metadata，让中转站/上游看到的 user_id 每次都不同，
+        # 防止只按 messages 哈希做 prompt-cache 的中转站把不同会话当成同一请求复用旧响应。
+        if request_tag:
+            kwargs["metadata"] = {"user_id": request_tag}
 
         async with client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:

@@ -1,7 +1,7 @@
 import asyncio
-import concurrent.futures
 import logging
 import random
+import threading
 from datetime import datetime, timezone, timedelta
 
 from app.celery_app import celery_app
@@ -19,13 +19,70 @@ _KEY_RETRY_CAP = 25
 
 def _run_async(coro):
     """
-    在独立线程里运行 async 协程，规避 gevent worker 中已有事件循环导致的
-    'asyncio.run() cannot be called from a running event loop' 错误。
-    每次都起新线程 + 新事件循环，互不干扰。
+    在**独占 OS 线程**里用全新 event loop 跑协程。
+
+    Celery `--pool=gevent` 下，`ThreadPoolExecutor` 可能被猴子补丁导致工作项在当前绿let/线程执行，
+    从而出现「第二次 asyncio.run() → RuntimeError: already running event loop」。
+    因此不用 asyncio.run、不用线程池，改为显式 new_event_loop + threading.Thread。
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(asyncio.run, coro)
-        return future.result()
+    result: list = []
+    errors: list = []
+
+    def _in_thread() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result.append(loop.run_until_complete(coro))
+        except BaseException as exc:
+            errors.append(exc)
+            try:
+                coro.close()
+            except Exception:
+                pass
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            try:
+                loop.close()
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
+
+    t = threading.Thread(target=_in_thread, name="celery-story-asyncio", daemon=True)
+    t.start()
+    t.join()
+    if errors:
+        raise errors[0]
+    return result[0] if result else None
+
+
+async def kick_queued_stories_for_user_async(user_id: int) -> None:
+    """
+    在**当前**事件循环里查询并投递下一条 queued（须在 asyncio.run 线程内 await）。
+    """
+    from app.database import AsyncSessionLocalWorker
+    from app.models.task import Task
+    from sqlalchemy import select
+
+    async with AsyncSessionLocalWorker() as db:
+        row = (
+            await db.execute(
+                select(Task.id).where(
+                    Task.user_id == user_id,
+                    Task.status == "queued",
+                ).order_by(Task.created_at.asc()).limit(1)
+            )
+        ).first()
+    tid = int(row[0]) if row else None
+    if tid is None:
+        return
+    try:
+        run_story.apply_async(args=[tid, user_id], countdown=0)
+        logger.info("Kick queued story | user_id=%s task_id=%s", user_id, tid)
+    except Exception:
+        logger.exception("kick apply_async failed | user_id=%s task_id=%s", user_id, tid)
 
 
 @celery_app.task(
@@ -79,10 +136,10 @@ def run_story(self, task_id: int, user_id: int = None):
 def _is_task_too_old(task_id: int) -> bool:
     """Return True if the task was created more than _MAX_TASK_AGE_HOURS ago."""
     async def _check():
-        from app.database import AsyncSessionLocal
+        from app.database import AsyncSessionLocalWorker
         from app.models.task import Task
         from sqlalchemy import select
-        async with AsyncSessionLocal() as db:
+        async with AsyncSessionLocalWorker() as db:
             task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
             if not task:
                 return True  # 任务已被删除，不再重试
@@ -94,12 +151,12 @@ def _is_task_too_old(task_id: int) -> bool:
 def _set_task_key_queue_waiting(task_id: int) -> None:
     """用户绑定 Key 时不会走此分支；仅系统池抢锁失败时提示排队原因。"""
     async def _do():
-        from app.database import AsyncSessionLocal
+        from app.database import AsyncSessionLocalWorker
         from app.models.task import Task
         from app.utils.task_messages import KEY_QUEUE_WAITING_MSG
         from sqlalchemy import select
 
-        async with AsyncSessionLocal() as db:
+        async with AsyncSessionLocalWorker() as db:
             task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
             if task and task.status == "queued":
                 task.warning_msg = KEY_QUEUE_WAITING_MSG
@@ -110,13 +167,21 @@ def _set_task_key_queue_waiting(task_id: int) -> None:
 
 def _mark_task_failed(task_id: int, error_msg: str):
     async def _do():
-        from app.database import AsyncSessionLocal
+        from app.database import AsyncSessionLocalWorker
         from app.models.task import Task
         from sqlalchemy import select
-        async with AsyncSessionLocal() as db:
+        async with AsyncSessionLocalWorker() as db:
             task = (await db.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
             if task:
                 task.status = "failed"
                 task.error_msg = error_msg
                 await db.commit()
     _run_async(_do())
+
+
+def kick_queued_stories_for_user(user_id: int) -> None:
+    """
+    当前 run 已释放写稿 Redis 锁之后：为同一用户再投递最早一条 queued 任务。
+    仅在有**运行中事件循环**的上下文中请改用 `await kick_queued_stories_for_user_async`。
+    """
+    _run_async(kick_queued_stories_for_user_async(user_id))
