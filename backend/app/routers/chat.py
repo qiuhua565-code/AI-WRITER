@@ -38,7 +38,7 @@ router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
 # 对话默认 system：减少「模拟界面 / 断网 Banner」类问题被模型习惯性打成整页 HTML/CSS 代码块。
 AI_STORYFLOW_CHAT_SYSTEM = (
-    "你是 AI-StoryFlow 的写作与产品助手。\n\n"
+    "你是「疯狂爆单AI」的写作与产品助手。\n\n"
     "当用户问的是**本产品界面会怎样表现**（断网、停止生成、保存失败、Banner 颜色与文案、"
     "点击图片全屏等），或让你「模拟」某种交互时：请用简洁中文分条说明**用户会看到什么、"
     "提示条的大致样式与原文案**即可；像说明产品行为一样回答，不要默认给出整页 HTML/CSS/"

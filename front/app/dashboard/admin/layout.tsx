@@ -63,7 +63,7 @@ export default function DashboardAdminLayout({
     <div className="space-y-6">
       <div
         className={cn(
-          "flex flex-wrap gap-2 rounded-2xl border border-slate-200/60 bg-white p-2 shadow-sm shadow-slate-900/[0.04] ring-1 ring-slate-100/80"
+          "flex flex-wrap gap-2 rounded-2xl border border-border/70 bg-card p-2 shadow-sm shadow-black/[0.03] ring-1 ring-border/40"
         )}
       >
         {tabs.map((t) => {
@@ -75,8 +75,8 @@ export default function DashboardAdminLayout({
               className={cn(
                 "inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors",
                 active
-                  ? "bg-amber-50/90 text-slate-900 ring-1 ring-amber-200/60"
-                  : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                  ? "bg-primary/[0.08] text-foreground ring-1 ring-primary/20"
+                  : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
               )}
             >
               <t.icon className="h-4 w-4 shrink-0 opacity-80" />

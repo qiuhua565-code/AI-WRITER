@@ -57,9 +57,9 @@ interface ArticleEditorProps {
 const statusConfig: Record<string, { label: string; color: string }> = {
   queued:      { label: "排队中",   color: "bg-muted text-muted-foreground" },
   writing:     { label: "生成中",   color: "bg-primary/10 text-primary" },
-  plan_review: { label: "待审规划", color: "bg-violet-500/10 text-violet-600" },
-  paused:      { label: "已暂停",   color: "bg-amber-500/10 text-amber-600" },
-  review:      { label: "待审核",   color: "bg-amber-500/10 text-amber-600" },
+  plan_review: { label: "待审规划", color: "bg-primary/10 text-primary" },
+  paused:      { label: "已暂停",   color: "bg-muted text-muted-foreground" },
+  review:      { label: "待审核",   color: "bg-secondary text-secondary-foreground" },
   approved:    { label: "已通过",   color: "bg-emerald-500/10 text-emerald-600" },
   rejected:    { label: "已拒绝",   color: "bg-destructive/10 text-destructive" },
   cancelled:   { label: "已取消",   color: "bg-muted text-muted-foreground" },
@@ -865,7 +865,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
       className={cn(
         "flex h-[calc(100vh-4rem)] flex-col",
         isReviewable &&
-          "bg-gradient-to-br from-amber-50/35 via-background to-background"
+          "bg-gradient-to-br from-primary/[0.04] via-background to-background"
       )}
     >
       {/* Header */}
@@ -985,7 +985,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
       )}
 
       {task.warning_msg && (
-        <div className="border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-700">
+        <div className="border-b border-primary/15 bg-primary/5 px-6 py-2 text-sm text-primary">
           {task.warning_msg}
         </div>
       )}
@@ -1051,8 +1051,8 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                     className={cn(
                       "w-full rounded-lg px-3 py-2 text-left text-sm transition-colors",
                       activeSegment === PANEL_AUTO_REVIEW
-                        ? "bg-violet-600 text-white shadow-sm"
-                        : "border border-violet-200/80 bg-violet-50/80 text-violet-950 hover:bg-violet-100/90"
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "border border-primary/20 bg-primary/5 text-foreground hover:bg-primary/10"
                     )}
                   >
                     <div className="flex items-center gap-1.5 font-medium">
@@ -1062,7 +1062,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                     <div
                       className={cn(
                         "mt-0.5 text-[11px] leading-snug opacity-90",
-                        activeSegment === PANEL_AUTO_REVIEW ? "text-white/85" : "text-violet-800/85"
+                        activeSegment === PANEL_AUTO_REVIEW ? "text-primary-foreground/90" : "text-primary/85"
                       )}
                     >
                       自动审阅报告（正文内的章节标题仍保留原样）
@@ -1163,14 +1163,14 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
               <>
                 {activeSegment === PANEL_AUTO_REVIEW ? (
                   <div className="mx-auto max-w-3xl space-y-4 pb-8">
-                    <div className="flex flex-wrap items-center gap-2 border-b border-violet-100 pb-3 text-sm">
-                      <Sparkles className="h-4 w-4 text-violet-600" />
-                      <span className="font-semibold text-violet-950">AI 审阅参考</span>
-                      <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] text-violet-800">
+                    <div className="flex flex-wrap items-center gap-2 border-b border-primary/10 pb-3 text-sm">
+                      <Sparkles className="h-4 w-4 text-primary" />
+                      <span className="font-semibold text-foreground">AI 审阅参考</span>
+                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] text-primary">
                         仅供参考 · 不导出
                       </span>
                       {task.auto_review_at ? (
-                        <span className="ml-auto text-[11px] text-violet-600/85">
+                        <span className="ml-auto text-[11px] text-primary/80">
                           {new Date(task.auto_review_at).toLocaleString("zh-CN", {
                             month: "numeric",
                             day: "numeric",
@@ -1182,7 +1182,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                       ) : null}
                     </div>
                     {task.auto_review_report?.trim() ? (
-                      <ScrollArea className="h-[calc(100vh-11rem)] rounded-xl border border-violet-100/90 bg-gradient-to-b from-violet-50/50 to-background pr-3">
+                      <ScrollArea className="h-[calc(100vh-11rem)] rounded-xl border border-primary/10 bg-gradient-to-b from-primary/[0.04] to-background pr-3">
                         <pre className="whitespace-pre-wrap p-5 font-serif text-[14px] leading-7 text-slate-700">
                           {task.auto_review_report}
                         </pre>
@@ -1240,8 +1240,8 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                           <span className={cn(
                             "rounded-full px-1.5 py-0.5 text-[11px] font-medium",
                             v.label === "AI 辅助应用" && "bg-primary/10 text-primary",
-                            v.label === "手动替换"    && "bg-violet-500/10 text-violet-600",
-                            v.label === "手动编辑"    && "bg-amber-500/10 text-amber-600",
+                            v.label === "手动替换"    && "bg-primary/10 text-primary",
+                            v.label === "手动编辑"    && "bg-primary/10 text-primary",
                             v.label === "恢复前快照"  && "bg-muted text-muted-foreground",
                             !["AI 辅助应用","手动替换","手动编辑","恢复前快照"].includes(v.label) && "bg-muted text-muted-foreground"
                           )}>
@@ -1312,10 +1312,10 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
               "flex w-[min(100vw,440px)] flex-col gap-0 border-l border-slate-200/80 bg-page-cream p-0 shadow-xl sm:max-w-[440px]"
             )}
           >
-            <SheetHeader className="shrink-0 space-y-0 border-b border-amber-200/45 bg-page-cream px-4 py-3 text-left">
+            <SheetHeader className="shrink-0 space-y-0 border-b border-border/60 bg-page-cream px-4 py-3 text-left">
               <div className="flex items-start gap-3 pr-8">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 shadow-sm">
-                  <Sparkles className="h-5 w-5 text-white" />
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary shadow-sm">
+                  <Sparkles className="h-5 w-5 text-primary-foreground" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <SheetTitle className="text-base font-semibold text-slate-900">AI 改稿</SheetTitle>
@@ -1382,7 +1382,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
               <div className="mx-auto max-w-full px-4 pb-6 pt-5">
                 {chatMessages.length === 0 ? (
                   <div className="flex min-h-[min(42vh,320px)] flex-col items-center justify-center gap-4 px-2 text-center">
-                    <Bot className="h-14 w-14 text-amber-200/90" />
+                    <Bot className="h-14 w-14 text-primary/25" />
                     <div className="space-y-1">
                       <p className="text-sm font-semibold text-slate-900">像对话一样改稿</p>
                       <p className="max-w-[260px] text-xs leading-relaxed text-slate-500">
@@ -1394,7 +1394,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                         <button
                           key={t}
                           type="button"
-                          className="rounded-full border border-slate-200/90 bg-white px-3 py-1.5 text-xs text-slate-700 shadow-sm transition hover:border-amber-300/80 hover:bg-amber-50/50"
+                          className="rounded-full border border-slate-200/90 bg-white px-3 py-1.5 text-xs text-slate-700 shadow-sm transition hover:border-primary/30 hover:bg-primary/5"
                           onClick={() => setChatInput((prev) => (prev ? `${prev}，${t}` : t))}
                         >
                           {t}
@@ -1419,8 +1419,8 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                           </div>
                         ) : (
                           <div className="flex gap-3">
-                            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100">
-                              <Bot className="h-4 w-4 text-amber-800" />
+                            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10">
+                              <Bot className="h-4 w-4 text-primary" />
                             </div>
                             <div className="min-w-0 flex-1 max-w-[min(100%,calc(100%-2.5rem))]">
                               <div className="rounded-2xl border border-slate-100/90 bg-white px-4 py-3 text-left shadow-sm">
@@ -1428,16 +1428,16 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                                   {msg.content}
                                   {msg.streaming &&
                                     (msg.content ? (
-                                      <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-amber-500" />
+                                      <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-primary" />
                                     ) : (
                                       <span className="mt-2 flex gap-1">
-                                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-amber-400" />
+                                        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/60" />
                                         <span
-                                          className="h-1.5 w-1.5 animate-bounce rounded-full bg-amber-400"
+                                          className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/60"
                                           style={{ animationDelay: "160ms" }}
                                         />
                                         <span
-                                          className="h-1.5 w-1.5 animate-bounce rounded-full bg-amber-400"
+                                          className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary/60"
                                           style={{ animationDelay: "320ms" }}
                                         />
                                       </span>
@@ -1449,7 +1449,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                                   {msg.isActionResponse && msg.selectedTextRef && (
                                     <button
                                       type="button"
-                                      className="inline-flex items-center gap-1.5 rounded-full border border-amber-200/90 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-950 hover:bg-amber-100/90"
+                                      className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-primary/10"
                                       onClick={() =>
                                         void handleApplyToArticle(msg.selectedTextRef!, msg.content)
                                       }
@@ -1460,7 +1460,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                                   )}
                                   <button
                                     type="button"
-                                    className="inline-flex items-center gap-1.5 rounded-full border border-violet-200/90 bg-violet-50 px-3 py-1.5 text-xs font-medium text-violet-950 hover:bg-violet-100/90 disabled:opacity-50"
+                                    className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-primary/10 disabled:opacity-50"
                                     disabled={smartApplyLoadingIdx !== null}
                                     onClick={() => void trySmartApplyFromChat(i)}
                                   >
@@ -1748,7 +1748,7 @@ export function ArticleEditor({ task }: ArticleEditorProps) {
                     <span className="font-medium text-foreground">{restoreConfirm.label}</span>
                     &nbsp;（{dateStr} {timeStr}，{restoreConfirm.word_count.toLocaleString()} 字）。
                   </p>
-                  <p className="text-amber-600">
+                  <p className="text-primary">
                     该版本之后的所有修改将被全部覆盖，包括其他段落的改动。
                   </p>
                   <p className="text-muted-foreground text-xs">

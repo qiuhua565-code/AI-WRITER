@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 
 app = FastAPI(
-    title="AI-StoryFlow API",
+    title="疯狂爆单AI API",
     version="0.1.0",
     docs_url="/docs" if settings.DEBUG else None,
 )

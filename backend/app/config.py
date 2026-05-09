@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # App
-    APP_NAME: str = "AI-StoryFlow"
+    APP_NAME: str = "疯狂爆单AI"
     DEBUG: bool = False
     SECRET_KEY: str = "change-me-in-production"
 

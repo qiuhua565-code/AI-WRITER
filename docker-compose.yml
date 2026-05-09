@@ -105,11 +105,11 @@ services:
     build:
       context: ./front
       args:
-        NEXT_PUBLIC_APP_NAME: "AI-StoryFlow"
+        NEXT_PUBLIC_APP_NAME: "疯狂爆单AI"
     restart: unless-stopped
     environment:
       BACKEND_URL: http://api:8000
-      NEXT_PUBLIC_APP_NAME: AI-StoryFlow
+      NEXT_PUBLIC_APP_NAME: "疯狂爆单AI"
     ports:
       - "3000:3000"
     depends_on:

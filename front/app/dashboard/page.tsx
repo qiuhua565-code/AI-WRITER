@@ -37,7 +37,7 @@ export default function DashboardPage() {
   if (isLoading) {
     return (
       <div className="space-y-5">
-        <div className="rounded-2xl border border-amber-200/60 bg-amber-50/80 px-4 py-3">
+        <div className="rounded-2xl border border-primary/15 bg-primary/5 px-4 py-3">
           <Skeleton className="h-4 w-full max-w-lg" />
         </div>
         <div className="rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">

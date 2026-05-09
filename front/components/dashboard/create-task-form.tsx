@@ -214,7 +214,7 @@ export function CreateTaskForm() {
 
   return (
     <div
-      className="min-h-[calc(100vh-5rem)] bg-gradient-to-b from-amber-50/40 via-background to-background px-4 pb-16 pt-8 md:px-8"
+      className="min-h-[calc(100vh-5rem)] bg-gradient-to-b from-primary/[0.04] via-background to-background px-4 pb-16 pt-8 md:px-8"
       onDragOver={preventFileDropDefault}
       onDrop={(e) => {
         preventFileDropDefault(e)
@@ -259,8 +259,8 @@ export function CreateTaskForm() {
             onDragOver={preventFileDropDefault}
             onDrop={handleInstructionDrop}
           >
-            <div className="flex items-center gap-2 border-b border-slate-100 bg-amber-50/50 px-5 py-3">
-              <ScrollText className="h-5 w-5 text-amber-600" />
+            <div className="flex items-center gap-2 border-b border-border bg-primary/5 px-5 py-3">
+              <ScrollText className="h-5 w-5 text-primary" />
               <span className="font-medium text-slate-800">基础指令文档</span>
               <span className="ml-auto text-xs text-slate-500">
                 长模板 · 建议用文件导入 · 可选
@@ -298,7 +298,7 @@ export function CreateTaskForm() {
                   </Button>
                 </div>
               ) : (
-                <div className="rounded-xl border border-amber-200/80 bg-amber-50/40 p-4">
+                <div className="rounded-xl border border-primary/15 bg-primary/5 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium text-slate-900">
@@ -324,7 +324,7 @@ export function CreateTaskForm() {
                   <button
                     type="button"
                     onClick={() => setDocPreviewOpen((o) => !o)}
-                    className="mt-2 text-xs font-medium text-amber-800/90 hover:underline"
+                    className="mt-2 text-xs font-medium text-primary hover:underline"
                   >
                     {docPreviewOpen ? "收起正文预览" : "查看正文预览"}
                   </button>
@@ -359,7 +359,7 @@ export function CreateTaskForm() {
           {/* 目标字数 */}
           <section className={cn(shellCard, "overflow-hidden")}>
             <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-3">
-              <Sparkles className="h-5 w-5 text-amber-600" />
+              <Sparkles className="h-5 w-5 text-primary" />
               <span className="font-medium text-slate-800">成稿目标总字数</span>
               <span className="ml-auto text-xs text-slate-500">留空则默认 18000 · 最低 10000</span>
             </div>
@@ -464,7 +464,7 @@ export function CreateTaskForm() {
                   {titles.map((title, index) => (
                     <li
                       key={`${title}-${index}`}
-                      className="group flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-white px-3 py-2.5 transition hover:border-amber-200/80 hover:bg-amber-50/30"
+                      className="group flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-white px-3 py-2.5 transition hover:border-primary/20 hover:bg-primary/5"
                     >
                       <div className="flex min-w-0 items-center gap-3">
                         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-xs font-medium text-slate-600">
@@ -510,7 +510,7 @@ export function CreateTaskForm() {
                 </>
               ) : (
                 <>
-                  <Sparkles className="mr-2 h-4 w-4 text-amber-300" />
+                  <Sparkles className="mr-2 h-4 w-4 text-primary/40" />
                   提交 {titles.length} 个任务
                 </>
               )}
@@ -518,7 +518,7 @@ export function CreateTaskForm() {
           </div>
         </form>
 
-        <p className="rounded-xl border border-amber-200/80 bg-amber-50/60 px-4 py-3 text-xs leading-relaxed text-slate-700">
+        <p className="rounded-xl border border-primary/15 bg-primary/5 px-4 py-3 text-xs leading-relaxed text-muted-foreground">
           <span className="font-medium text-slate-900">提示：</span>
           任务进入队列后将在后台生成；基础指令文档与补充提示、目标字数会写入每个任务的配置，在文章审核页「AI
           改稿」侧栏可展开查看。

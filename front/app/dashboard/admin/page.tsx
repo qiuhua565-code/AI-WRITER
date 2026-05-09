@@ -63,7 +63,7 @@ export default function AdminDashboardPage() {
     { title: "总用户数", value: stats.users_total, desc: `${stats.users_active} 个活跃`, icon: Users, color: "text-primary" },
     { title: "总任务数", value: stats.tasks_total, desc: "全站所有用户", icon: FileText, color: "text-muted-foreground" },
     { title: "执行中", value: stats.tasks_running, desc: "排队 + 生成中", icon: Activity, color: "text-sky-600" },
-    { title: "待审核", value: review, desc: "生成完成待用户审核", icon: Clock, color: "text-amber-600" },
+    { title: "待审核", value: review, desc: "生成完成待用户审核", icon: Clock, color: "text-primary" },
     { title: "已通过", value: approved, desc: "审核通过", icon: CheckCircle, color: "text-emerald-600" },
     { title: "失败", value: failed, desc: "执行失败的任务", icon: AlertCircle, color: "text-destructive" },
   ]

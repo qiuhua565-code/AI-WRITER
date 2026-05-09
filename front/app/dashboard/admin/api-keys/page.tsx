@@ -31,7 +31,7 @@ const PURPOSES = [
 
 const purposeConfig: Record<string, { label: string; cls: string }> = {
   both: { label: '通用',    cls: 'bg-primary/10 text-primary' },
-  task: { label: '写稿',    cls: 'bg-violet-500/10 text-violet-600' },
+  task: { label: '写稿',    cls: 'bg-muted text-foreground' },
   chat: { label: '对话',    cls: 'bg-emerald-500/10 text-emerald-600' },
 }
 
@@ -136,22 +136,22 @@ export default function AdminApiKeysPage() {
           <p className="text-xs text-muted-foreground">Key 总数</p>
           <p className="mt-1 text-2xl font-bold">{keys.length}</p>
         </div>
-        <div className="rounded-lg border border-violet-200 bg-violet-50 p-4 dark:border-violet-800 dark:bg-violet-950/40">
-          <p className="text-xs text-violet-600 dark:text-violet-400">写稿最大并发</p>
-          <p className="mt-1 text-2xl font-bold text-violet-700 dark:text-violet-300">{activeCount} 个任务</p>
+        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 dark:border-primary/30 dark:bg-primary/10">
+          <p className="text-xs text-primary dark:text-primary">写稿最大并发</p>
+          <p className="mt-1 text-2xl font-bold text-foreground">{activeCount} 个任务</p>
         </div>
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-800 dark:bg-emerald-950/40">
           <p className="text-xs text-emerald-600 dark:text-emerald-400">对话可用 Key</p>
           <p className="mt-1 text-2xl font-bold text-emerald-700 dark:text-emerald-300">{chatKeyCount} 个</p>
         </div>
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/40">
-          <p className="text-xs text-amber-600 dark:text-amber-400">写稿占用中</p>
-          <p className="mt-1 text-2xl font-bold text-amber-700 dark:text-amber-300">{inUseCount} 个 Key</p>
+        <div className="rounded-lg border border-border bg-muted/50 p-4 dark:border-border dark:bg-muted/30">
+          <p className="text-xs text-muted-foreground">写稿占用中</p>
+          <p className="mt-1 text-2xl font-bold text-foreground">{inUseCount} 个 Key</p>
         </div>
       </div>
 
       {/* Key rule hint */}
-      <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300">
+      <div className="rounded-lg border border-primary/15 bg-primary/5 px-4 py-3 text-xs text-foreground dark:border-primary/25 dark:bg-primary/10">
         <span className="font-medium">用途说明：</span>
         「写稿」Key 用于异步生文任务，每个 Key 同时只跑 1 个任务（排他锁），配 N 个 = 最多 N 路并发；
         「对话」Key 专供 AI 对话和辅助修改，不加锁，不互相占用；
@@ -197,7 +197,7 @@ export default function AdminApiKeysPage() {
                   <TableCell className="font-mono text-sm">{k.key_hint}</TableCell>
                   <TableCell>
                     {k.in_use ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary dark:bg-primary/20">
                         <Zap className="h-3 w-3" />
                         使用中
                       </span>
@@ -219,7 +219,7 @@ export default function AdminApiKeysPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-8 w-8 text-amber-500 hover:text-amber-700"
+                          className="h-8 w-8 text-primary hover:text-primary/80"
                           title="强制释放锁（任务已终止但锁未释放时使用）"
                           onClick={() => handleRelease(k.id)}
                           disabled={actionId === k.id}

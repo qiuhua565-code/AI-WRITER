@@ -10,6 +10,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { BrandMark } from "@/components/brand-logo"
+import { BRAND_NAME } from "@/lib/brand"
 
 interface TopNavProps {
   onToggleSidebar?: () => void
@@ -25,10 +27,8 @@ export function TopNav({ onToggleSidebar }: TopNavProps) {
         
         {/* Logo */}
         <div className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center">
-            <span className="text-primary-foreground font-bold text-sm">AI</span>
-          </div>
-          <span className="font-semibold text-lg text-foreground hidden sm:inline">AI-StoryFlow</span>
+          <BrandMark size={32} />
+          <span className="font-semibold text-lg text-foreground hidden sm:inline">{BRAND_NAME}</span>
         </div>
         
         {/* Breadcrumbs */}

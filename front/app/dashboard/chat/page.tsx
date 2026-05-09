@@ -49,6 +49,8 @@ import {
   Square,
   AlertCircle,
 } from "lucide-react"
+import { BrandMark } from "@/components/brand-logo"
+import { BRAND_NAME } from "@/lib/brand"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Input } from "@/components/ui/input"
@@ -1077,13 +1079,13 @@ function MessageContent({
       prose-h3:text-[15px] prose-h3:mt-4 prose-h3:mb-2 prose-h3:text-slate-800
       prose-h4:text-[14px] prose-h4:mt-3 prose-h4:mb-1.5
       prose-ul:my-3 prose-ol:my-3 prose-li:my-1
-      [&_ul>li]:marker:text-amber-500/80 [&_ol>li]:marker:text-amber-600/90 [&_ol>li]:marker:font-semibold
+      [&_ul>li]:marker:text-primary/75 [&_ol>li]:marker:text-primary/85 [&_ol>li]:marker:font-semibold
       [&_ul]:pl-5 [&_ol]:pl-5
       prose-code:text-rose-600 prose-code:bg-slate-100/90 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[13px] prose-code:font-normal prose-code:before:content-none prose-code:after:content-none
       prose-pre:my-0 prose-pre:p-0 prose-pre:bg-transparent
-      [&_blockquote]:not-italic [&_blockquote]:border-l-4 [&_blockquote]:border-amber-400/70 [&_blockquote]:bg-amber-50/70 [&_blockquote]:rounded-r-xl [&_blockquote]:px-4 [&_blockquote]:py-2.5 [&_blockquote]:my-3 [&_blockquote]:text-slate-700
+      [&_blockquote]:not-italic [&_blockquote]:border-l-4 [&_blockquote]:border-primary/45 [&_blockquote]:bg-primary/[0.07] [&_blockquote]:rounded-r-xl [&_blockquote]:px-4 [&_blockquote]:py-2.5 [&_blockquote]:my-3 [&_blockquote]:text-slate-700
       [&_blockquote_p]:my-1 [&_blockquote_p:before]:content-none [&_blockquote_p:after]:content-none
-      prose-a:text-amber-700 prose-a:no-underline hover:prose-a:underline prose-a:underline-offset-2
+      prose-a:text-primary prose-a:no-underline hover:prose-a:underline prose-a:underline-offset-2
       prose-strong:font-semibold prose-strong:text-slate-900
       prose-em:text-slate-700
       prose-hr:my-5 prose-hr:border-slate-200
@@ -1093,7 +1095,7 @@ function MessageContent({
       [&_tbody_tr:nth-child(even)]:bg-slate-50/40
       [&_img]:rounded-lg [&_img]:shadow-sm [&_img]:my-3
       [&_kbd]:rounded [&_kbd]:border [&_kbd]:border-slate-300 [&_kbd]:bg-slate-50 [&_kbd]:px-1.5 [&_kbd]:py-[1px] [&_kbd]:text-[12px] [&_kbd]:font-mono [&_kbd]:text-slate-700 [&_kbd]:shadow-[inset_0_-1px_0_rgba(0,0,0,0.08)]
-      [&_mark]:bg-amber-100/80 [&_mark]:text-amber-900 [&_mark]:rounded [&_mark]:px-0.5
+      [&_mark]:bg-primary/12 [&_mark]:text-foreground [&_mark]:rounded [&_mark]:px-0.5
       [&_sup]:text-[10px] [&_sub]:text-[10px]
       [&_input[type=checkbox]]:!appearance-none [&_input[type=checkbox]]:!h-[15px] [&_input[type=checkbox]]:!w-[15px] [&_input[type=checkbox]]:!align-[-2px] [&_input[type=checkbox]]:!rounded-[4px] [&_input[type=checkbox]]:!border [&_input[type=checkbox]]:!border-slate-300 [&_input[type=checkbox]]:!bg-white [&_input[type=checkbox]]:!mr-1.5
       [&_input[type=checkbox]:checked]:!border-emerald-500 [&_input[type=checkbox]:checked]:!bg-emerald-500 [&_input[type=checkbox]:checked]:!bg-[url('data:image/svg+xml;utf8,<svg_xmlns=%22http://www.w3.org/2000/svg%22_viewBox=%220_0_24_24%22_fill=%22none%22_stroke=%22white%22_stroke-width=%223%22_stroke-linecap=%22round%22_stroke-linejoin=%22round%22><polyline_points=%2220_6_9_17_4_12%22/></svg>')] [&_input[type=checkbox]:checked]:!bg-center [&_input[type=checkbox]:checked]:!bg-no-repeat [&_input[type=checkbox]:checked]:!bg-[length:11px_11px]
@@ -1106,16 +1108,16 @@ function MessageContent({
           <details
             key={`think-${idx}`}
             data-no-copy
-            className="not-prose my-3 rounded-xl border border-violet-200/90 bg-gradient-to-b from-violet-50/90 to-slate-50/40 text-[14px] shadow-sm open:shadow-md"
+            className="not-prose my-3 rounded-xl border border-primary/20 bg-gradient-to-b from-primary/[0.06] to-slate-50/40 text-[14px] shadow-sm open:shadow-md"
           >
-            <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-violet-900 marker:content-none [&::-webkit-details-marker]:hidden">
+            <summary className="cursor-pointer list-none px-3 py-2.5 font-medium text-foreground marker:content-none [&::-webkit-details-marker]:hidden">
               <span className="inline-flex items-center gap-2">
-                <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-600" />
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />
                 {thinkTitle(seg.tag)}
-                <span className="text-xs font-normal text-violet-600/80">（点击展开）</span>
+                <span className="text-xs font-normal text-primary/75">（点击展开）</span>
               </span>
             </summary>
-            <div className="border-t border-violet-100/90 px-3 py-2.5 text-slate-700">
+            <div className="border-t border-primary/10 px-3 py-2.5 text-slate-700">
               {seg.body ? (
                 <ReactMarkdown
                   remarkPlugins={chatRemarkPlugins}
@@ -1955,7 +1957,7 @@ export default function ChatPage() {
           className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-medium text-slate-700 hover:bg-white/80"
         >
           <LayoutDashboard className="h-4 w-4" />
-          工作台
+          首页
         </Link>
         <div className="flex items-center gap-1">
           <Button
@@ -2027,7 +2029,7 @@ export default function ChatPage() {
                 className={cn(
                   "group grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
                   activeSession?.id === session.id
-                    ? "bg-white shadow-sm ring-1 ring-amber-200/80"
+                    ? "bg-white shadow-sm ring-1 ring-primary/20"
                     : "hover:bg-white/70 text-slate-700"
                 )}
               >
@@ -2051,7 +2053,7 @@ export default function ChatPage() {
         <div className="rounded-xl bg-white/90 p-3 shadow-sm ring-1 ring-slate-200/60">
           <div className="flex items-center gap-2">
             <Avatar className="h-9 w-9">
-              <AvatarFallback className="bg-amber-100 text-amber-900 text-xs">
+              <AvatarFallback className="bg-primary/10 text-primary text-xs">
                 {initials}
               </AvatarFallback>
             </Avatar>
@@ -2085,14 +2087,12 @@ export default function ChatPage() {
         style={{ width: `${sidebarWidth}px` }}
       >
         <div className="flex items-center gap-2 border-b border-slate-200/80 px-4 py-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 shadow-sm">
-            <Sparkles className="h-4 w-4 text-white" />
-          </div>
+          <BrandMark size={36} />
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-slate-900">
-              AI-StoryFlow
+            <p className="truncate text-sm font-semibold text-foreground">
+              {BRAND_NAME}
             </p>
-            <p className="text-[11px] text-slate-500">对话</p>
+            <p className="text-[11px] text-muted-foreground">对话</p>
           </div>
         </div>
         <div className="flex min-h-0 flex-1 flex-col">{SidebarBody}</div>
@@ -2111,8 +2111,8 @@ export default function ChatPage() {
             } catch {}
           }}
           className={cn(
-            "absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-amber-300/60",
-            resizingSidebar && "bg-amber-400/70"
+            "absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-primary/30",
+            resizingSidebar && "bg-primary/45"
           )}
           title="拖动调整宽度（双击恢复默认）"
         />
@@ -2141,7 +2141,7 @@ export default function ChatPage() {
       <div
         className={cn(
           "relative flex min-w-0 flex-1 flex-col transition-colors",
-          fileDragOver && "bg-amber-100/50 ring-2 ring-inset ring-amber-400/60"
+          fileDragOver && "bg-primary/10 ring-2 ring-inset ring-primary/35"
         )}
         onDragOver={handleMainDragOver}
         onDragLeave={handleMainDragLeave}
@@ -2160,7 +2160,7 @@ export default function ChatPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="gap-1.5 text-xs border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                  className="gap-1.5 text-xs border-primary/30 bg-primary/5 text-primary hover:bg-primary/10"
                   onClick={async () => {
                     if (sending || sendingRef.current) return
                     const text = "请帮我全面检查这篇文章"
@@ -2229,13 +2229,13 @@ export default function ChatPage() {
             </div>
           </div>
           {linkedTask && (
-            <div className="flex items-center gap-2 border-t border-amber-100 bg-amber-50/60 px-4 py-1.5 text-xs text-amber-800">
+            <div className="flex items-center gap-2 border-t border-primary/10 bg-primary/5 px-4 py-1.5 text-xs text-foreground">
               <BookOpen className="h-3.5 w-3.5 shrink-0" />
               <span>已关联：<span className="font-medium">{linkedTask.title}</span></span>
-              <span className="text-amber-600">·</span>
+              <span className="text-primary">·</span>
               <span>{linkedTask.content.length > 0 ? `${Math.round(linkedTask.content.replace(/[^\u4e00-\u9fff]/g, '').length)}+ 字` : "空文章"}</span>
               <button
-                className="ml-auto text-amber-600 hover:text-amber-900"
+                className="ml-auto text-primary hover:text-foreground"
                 onClick={() => setLinkedTask(null)}
               >
                 <X className="h-3.5 w-3.5" />
@@ -2245,7 +2245,7 @@ export default function ChatPage() {
         </header>
 
         {/* 公告条 */}
-        <div className="shrink-0 border-b border-amber-200/50 bg-amber-50/90 px-4 py-2 text-center text-[11px] text-amber-950/85 sm:text-xs">
+        <div className="shrink-0 border-b border-primary/15 bg-primary/5 px-4 py-2 text-center text-[11px] text-foreground/90 sm:text-xs">
           支持将<span className="font-medium">图片 / PDF / Word（.docx）/ 文本</span>
           拖入此区域或输入框。文档在对话中以卡片展示，不展开全文。模型需支持识图/读文档（如 Sonnet、Opus）。
         </div>
@@ -2259,7 +2259,7 @@ export default function ChatPage() {
           {!activeSession ? (
             <div className="flex min-h-[48vh] flex-col items-center justify-center gap-6 px-2 text-center">
               <p className="font-serif text-3xl font-normal tracking-tight text-slate-800 md:text-4xl">
-                <span className="mr-2 inline-block text-amber-500">☀</span>
+                <span className="mr-2 inline-block text-primary">☀</span>
                 {greetingLabel()}，{displayName}
               </p>
               <p className="max-w-md text-sm text-slate-600">
@@ -2270,7 +2270,7 @@ export default function ChatPage() {
                   <button
                     key={t}
                     type="button"
-                    className="rounded-full border border-slate-200/90 bg-white px-3 py-1.5 text-xs text-slate-700 shadow-sm transition hover:border-amber-300/80 hover:bg-amber-50/50"
+                    className="rounded-full border border-slate-200/90 bg-white px-3 py-1.5 text-xs text-slate-700 shadow-sm transition hover:border-primary/30 hover:bg-primary/5"
                     onClick={() => setInput((prev) => (prev ? `${prev}\n${t}` : t))}
                   >
                     {t}
@@ -2280,7 +2280,7 @@ export default function ChatPage() {
             </div>
           ) : messages.length === 0 ? (
             <div className="flex min-h-[40vh] flex-col items-center justify-center gap-3 text-center text-slate-600">
-              <Bot className="h-12 w-12 text-amber-200" />
+              <Bot className="h-12 w-12 text-primary/20" />
               <p className="text-sm font-medium text-slate-800">
                 新会话「{activeSession.title}」
               </p>
@@ -2294,7 +2294,7 @@ export default function ChatPage() {
                 <div key={msg.id} className="group/msg">
                   {msg.role === "user" ? (
                     <div className="flex justify-end gap-3">
-                      <div className="max-w-[78%] rounded-2xl bg-amber-50/80 px-4 py-2.5 ring-1 ring-amber-200/50">
+                      <div className="max-w-[78%] rounded-2xl bg-primary/[0.07] px-4 py-2.5 ring-1 ring-primary/15">
                         {msg.attachments && msg.attachments.length > 0 && (
                           <div className="mb-2 flex flex-wrap gap-2">
                             {msg.attachments.map((a, i) =>
@@ -2372,8 +2372,8 @@ export default function ChatPage() {
                     </div>
                   ) : (
                     <div className="flex gap-3">
-                      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100/90 ring-1 ring-amber-200/60">
-                        <Bot className="h-4 w-4 text-amber-800" />
+                      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 ring-1 ring-primary/15">
+                        <Bot className="h-4 w-4 text-primary" />
                       </div>
                       <div className="min-w-0 flex-1">
                         {editingId === msg.id ? (
@@ -2639,7 +2639,7 @@ export default function ChatPage() {
                 variant="ghost"
                 size="icon"
                 className="h-9 w-9 rounded-lg text-slate-600"
-                title="工作台首页"
+                title="返回首页"
               >
                 <Home className="h-4 w-4" />
               </Button>
@@ -2798,7 +2798,7 @@ export default function ChatPage() {
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-primary">
                   <Eraser className="h-4 w-4" />
                 </span>
                 清理空会话
@@ -2821,7 +2821,7 @@ export default function ChatPage() {
                   confirmCleanupEmptySessions()
                 }}
                 disabled={cleaningEmpty}
-                className="bg-amber-600 text-white hover:bg-amber-700 focus-visible:ring-amber-300"
+                className="bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:ring-primary/35"
               >
                 {cleaningEmpty ? (
                   <>
@@ -2943,7 +2943,7 @@ function AssistantToolbar({
         size="icon"
         className={cn(
           "h-8 w-8",
-          feedback === "up" ? "text-amber-700" : "text-slate-500"
+          feedback === "up" ? "text-primary" : "text-slate-500"
         )}
         type="button"
         title="有帮助"

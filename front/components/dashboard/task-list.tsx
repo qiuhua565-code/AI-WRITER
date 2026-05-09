@@ -48,25 +48,25 @@ export function TaskList({ tasks, total }: TaskListProps) {
   return (
     <div className="space-y-5">
       {/* 公告条 —— 参考图顶部黄色提示 */}
-      <div className="rounded-2xl border border-amber-200/70 bg-amber-50/90 px-4 py-3 text-sm leading-relaxed text-amber-950 shadow-sm ring-1 ring-amber-100/80">
+      <div className="rounded-2xl border border-primary/15 bg-primary/5 px-4 py-3 text-sm leading-relaxed text-foreground shadow-sm ring-1 ring-primary/10">
         <span className="font-semibold">提示：</span>
         任务提交后在后台排队生成；可在「任务列表」查看进度，完成后进入文章审核与编辑。
-        <span className="mt-1 block text-[13px] text-amber-900/90">
+        <span className="mt-1 block text-[13px] text-muted-foreground">
           若多个任务长时间停在「排队中」，通常是<strong>系统写稿 API Key 已被其他任务占用</strong>（每把 Key 同时只跑一篇），不是容器数量不够；可增加「写稿」用途的系统 Key，或为用户绑定「生成」用途的个人 Key。
         </span>
       </div>
 
-      <div className="relative overflow-hidden rounded-2xl border border-slate-200/70 bg-white p-5 shadow-sm shadow-slate-900/[0.04] ring-1 ring-slate-100 sm:p-7">
+      <div className="relative overflow-hidden rounded-2xl border border-border/80 bg-card p-5 shadow-sm shadow-black/[0.03] ring-1 ring-border/35 sm:p-7">
         <div
-          className="pointer-events-none absolute -right-10 -top-10 h-36 w-36 rounded-full bg-violet-100/50 blur-2xl"
+          className="pointer-events-none absolute -right-10 -top-10 h-36 w-36 rounded-full bg-primary/[0.06] blur-2xl"
           aria-hidden
         />
         <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 sm:text-3xl">
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
               我的任务
             </h1>
-            <p className="mt-1 text-sm text-slate-500">
+            <p className="mt-1 text-sm text-muted-foreground">
               共 {total} 个任务
               {pendingReview > 0 && ` · ${pendingReview} 个待审核`}
             </p>
@@ -74,7 +74,7 @@ export function TaskList({ tasks, total }: TaskListProps) {
           <Button
             asChild
             size="lg"
-            className="shrink-0 rounded-full bg-orange-500 px-6 text-white shadow-md shadow-orange-500/25 hover:bg-orange-600"
+            className="shrink-0 rounded-full px-6 shadow-md shadow-primary/20"
           >
             <Link href="/dashboard/new">
               <Plus className="mr-2 h-4 w-4" />
@@ -85,22 +85,22 @@ export function TaskList({ tasks, total }: TaskListProps) {
       </div>
 
       {/* 搜索与筛选 —— 圆角搜索条 */}
-      <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-white p-3 shadow-sm ring-1 ring-slate-100 sm:flex-row sm:items-center">
+      <div className="flex flex-col gap-3 rounded-2xl border border-border/80 bg-card p-3 shadow-sm ring-1 ring-border/35 sm:flex-row sm:items-center">
         <div className="relative min-w-0 flex-1">
-          <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="搜索任务标题..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="h-11 rounded-full border-slate-200 bg-slate-50/80 pl-11 pr-4 shadow-inner shadow-slate-900/[0.03]"
+            className="h-11 rounded-full border-border bg-muted/50 pl-11 pr-4 shadow-inner shadow-black/[0.03]"
           />
         </div>
         <Select
           value={statusFilter}
           onValueChange={(value) => setStatusFilter(value as TaskStatus | "all")}
         >
-          <SelectTrigger className="h-11 w-full rounded-full border-slate-200 bg-white sm:w-44">
-            <Filter className="mr-2 h-4 w-4 text-slate-500" />
+          <SelectTrigger className="h-11 w-full rounded-full border-border bg-card sm:w-44">
+            <Filter className="mr-2 h-4 w-4 text-muted-foreground" />
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

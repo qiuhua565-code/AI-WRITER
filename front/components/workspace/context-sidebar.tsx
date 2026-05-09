@@ -39,16 +39,16 @@ const knowledgeTags: KnowledgeTag[] = [
 
 const statusConfig = {
   completed: { label: "已完成", variant: "default" as const, className: "bg-emerald-500/10 text-emerald-600 border-emerald-200" },
-  drafted: { label: "草稿", variant: "secondary" as const, className: "bg-amber-500/10 text-amber-600 border-amber-200" },
-  review: { label: "审核中", variant: "outline" as const, className: "bg-blue-500/10 text-blue-600 border-blue-200" },
+  drafted: { label: "草稿", variant: "secondary" as const, className: "bg-primary/10 text-primary border-primary/20" },
+  review: { label: "审核中", variant: "outline" as const, className: "bg-primary/10 text-primary border-primary/20" },
   pending: { label: "待处理", variant: "outline" as const, className: "bg-slate-500/10 text-slate-500 border-slate-200" },
 }
 
 const tagTypeConfig = {
-  character: { icon: User, className: "bg-violet-500/10 text-violet-600 border-violet-200 hover:bg-violet-500/20" },
-  style: { icon: Palette, className: "bg-rose-500/10 text-rose-600 border-rose-200 hover:bg-rose-500/20" },
-  setting: { icon: BookOpen, className: "bg-cyan-500/10 text-cyan-600 border-cyan-200 hover:bg-cyan-500/20" },
-  plot: { icon: FileText, className: "bg-amber-500/10 text-amber-600 border-amber-200 hover:bg-amber-500/20" },
+  character: { icon: User, className: "bg-primary/10 text-primary border-primary/20 hover:bg-primary/15" },
+  style: { icon: Palette, className: "bg-muted text-foreground border-border hover:bg-muted/80" },
+  setting: { icon: BookOpen, className: "bg-secondary text-secondary-foreground border-border hover:bg-secondary/80" },
+  plot: { icon: FileText, className: "bg-primary/[0.08] text-primary border-primary/20 hover:bg-primary/12" },
 }
 
 interface ContextSidebarProps {

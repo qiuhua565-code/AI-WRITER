@@ -87,15 +87,15 @@ const statusConfig: Record<
   },
   plan_review: {
     label: "待审规划",
-    strip: "bg-indigo-600",
-    dot: "bg-indigo-500",
+    strip: "bg-primary",
+    dot: "bg-primary/90",
     icon: ClipboardCheck,
     description: "规划已生成，等待您审核确认",
   },
   paused: {
     label: "已暂停",
-    strip: "bg-amber-500",
-    dot: "bg-amber-500",
+    strip: "bg-slate-500",
+    dot: "bg-slate-500",
     icon: Pause,
     description: "任务已暂停，可以继续执行",
   },
@@ -252,7 +252,7 @@ export function TaskCard({ task }: TaskCardProps) {
           <div className="min-w-0 flex-1">
             <Tooltip delayDuration={300}>
               <TooltipTrigger asChild>
-                <h3 className="line-clamp-2 cursor-default text-left text-sm font-semibold leading-snug text-slate-900 group-hover:text-violet-800">
+                <h3 className="line-clamp-2 cursor-default text-left text-sm font-semibold leading-snug text-slate-900 group-hover:text-primary">
                   {task.title}
                 </h3>
               </TooltipTrigger>
@@ -275,7 +275,7 @@ export function TaskCard({ task }: TaskCardProps) {
               {hasInstructionHint && (
                 <Badge
                   variant="outline"
-                  className="border-violet-200 bg-violet-50 px-1 py-0 text-[9px] font-normal text-violet-900"
+                  className="border-primary/20 bg-primary/5 px-1 py-0 text-[9px] font-normal text-primary"
                   title="创建时填写了指令"
                 >
                   <ScrollText className="mr-0.5 h-2.5 w-2.5" />
@@ -303,7 +303,7 @@ export function TaskCard({ task }: TaskCardProps) {
               )}
             </div>
             {(isClickable || isPlanReview) && (
-              <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 transition-colors group-hover:text-violet-500" aria-hidden />
+              <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 transition-colors group-hover:text-primary" aria-hidden />
             )}
           </div>
         </div>
@@ -353,7 +353,7 @@ export function TaskCard({ task }: TaskCardProps) {
             <p className="line-clamp-2 text-xs leading-relaxed text-slate-500">{cfg.description}</p>
           )}
           {task.warning_msg && (
-            <p className="mt-1 text-[11px] leading-snug text-amber-700">{task.warning_msg}</p>
+            <p className="mt-1 text-[11px] leading-snug text-muted-foreground">{task.warning_msg}</p>
           )}
         </div>
 

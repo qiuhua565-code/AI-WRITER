@@ -1,42 +1,26 @@
 import type { Metadata } from 'next'
-import { Inter, Merriweather } from 'next/font/google'
+import { Plus_Jakarta_Sans, Source_Serif_4 } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { Providers } from '@/lib/providers'
+import { BRAND_DESCRIPTION, BRAND_NAME } from '@/lib/brand'
 import './globals.css'
 import 'katex/dist/katex.min.css'
-import 'katex/dist/katex.min.css'
 
-const inter = Inter({ 
-  subsets: ["latin"],
-  variable: '--font-inter',
-});
+const fontSans = Plus_Jakarta_Sans({
+  subsets: ['latin', 'latin-ext'],
+  variable: '--font-ui-sans',
+})
 
-const merriweather = Merriweather({ 
-  subsets: ["latin"],
-  weight: ['300', '400', '700'],
-  variable: '--font-merriweather',
-});
+const fontSerif = Source_Serif_4({
+  subsets: ['latin', 'latin-ext'],
+  variable: '--font-ui-serif',
+})
 
 export const metadata: Metadata = {
-  title: 'AI-StoryFlow | AI写作工作空间',
-  description: '智能AI写作助手，帮助您更高效地创作故事',
-  generator: 'v0.app',
+  title: BRAND_NAME,
+  description: BRAND_DESCRIPTION,
   icons: {
-    icon: [
-      {
-        url: '/icon-light-32x32.png',
-        media: '(prefers-color-scheme: light)',
-      },
-      {
-        url: '/icon-dark-32x32.png',
-        media: '(prefers-color-scheme: dark)',
-      },
-      {
-        url: '/icon.svg',
-        type: 'image/svg+xml',
-      },
-    ],
-    apple: '/apple-icon.png',
+    icon: [{ url: '/icon.svg', type: 'image/svg+xml' }],
   },
 }
 
@@ -47,10 +31,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" className="bg-background">
-      <body className={`${inter.variable} ${merriweather.variable} font-sans antialiased`}>
-        <Providers>
-          {children}
-        </Providers>
+      <body
+        className={`${fontSans.variable} ${fontSerif.variable} font-sans antialiased`}
+      >
+        <Providers>{children}</Providers>
         {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>

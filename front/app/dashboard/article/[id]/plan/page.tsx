@@ -128,7 +128,7 @@ export default function PlanReviewPage({ params }: PlanPageProps) {
           <h1 className="text-2xl font-bold text-foreground">审核故事规划</h1>
           <p className="text-sm text-muted-foreground">{task.title}</p>
         </div>
-        <Badge className="ml-auto bg-violet-500/10 text-violet-600">待审规划</Badge>
+        <Badge className="ml-auto bg-primary/10 text-primary">待审规划</Badge>
       </div>
 
       {/* Plan Cards */}
